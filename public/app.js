@@ -1,0 +1,510 @@
+const state = {
+  user: null,
+  events: [],
+  organizations: [],
+  tickets: [],
+  incomingTransfers: [],
+  orgStats: [],
+  eventSearch: "",
+  organizationFilter: "",
+};
+
+const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
+
+function setNotice(text, isError = false) {
+  const notice = $("#authNotice");
+  notice.textContent = text || "";
+  notice.style.color = isError ? "var(--bad)" : "var(--earth)";
+}
+
+function clearAuthForms() {
+  $$(".auth-form").forEach((form) => form.reset());
+  setNotice("");
+}
+
+function formatPrice(value) {
+  return `$${Number(value || 0).toFixed(0)} MXN`;
+}
+
+async function api(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || "Ocurrió un error.");
+  return data;
+}
+
+function formData(form) {
+  return Object.fromEntries(new FormData(form).entries());
+}
+
+function statusText(status) {
+  return {
+    valid: "Válido",
+    used: "Usado",
+    expired: "Expirado",
+    tampered: "Alterado",
+    transfer_pending: "Transferencia pendiente",
+  }[status] || status;
+}
+
+function ticketCodeFromInput(value) {
+  const trimmed = String(value || "").trim();
+  const match = trimmed.match(/\/ticket\/([^/?#]+)/);
+  return match ? match[1] : trimmed;
+}
+
+function moneylessCopy() {
+  return "La compra se simula sin pagos; el objetivo es mostrar la validación criptográfica.";
+}
+
+async function init() {
+  $$(".tabs button").forEach((button) => {
+    button.addEventListener("click", () => {
+      $$(".tabs button").forEach((item) => item.classList.remove("active"));
+      button.classList.add("active");
+      $$(".auth-form").forEach((form) => form.classList.add("hidden"));
+      $(`#${button.dataset.tab}Form`).classList.remove("hidden");
+      setNotice("");
+    });
+  });
+
+  $("#loginForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = await api("/api/auth/login", { method: "POST", body: JSON.stringify(formData(event.target)) });
+      state.user = data.user;
+      clearAuthForms();
+      await loadDashboard();
+    } catch (error) {
+      setNotice(error.message, true);
+    }
+  });
+
+  $("#registerForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = await api("/api/auth/register", { method: "POST", body: JSON.stringify(formData(event.target)) });
+      setNotice(data.message);
+      event.target.reset();
+    } catch (error) {
+      setNotice(error.message, true);
+    }
+  });
+
+  $("#forgotForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const data = await api("/api/auth/forgot", { method: "POST", body: JSON.stringify(formData(event.target)) });
+      setNotice(data.message);
+      event.target.reset();
+    } catch (error) {
+      setNotice(error.message, true);
+    }
+  });
+
+  $("#logoutBtn").addEventListener("click", async () => {
+    await api("/api/auth/logout", { method: "POST" });
+    state.user = null;
+    clearAuthForms();
+    $("#appView").style.display = "none";
+    $("#authView").style.display = "grid";
+  });
+
+  const params = new URLSearchParams(location.search);
+  if (params.get("notice") === "email-verified") setNotice("Correo verificado. Ya puedes iniciar sesión.");
+  if (params.get("notice") === "token-invalid") setNotice("El enlace no es válido o ya fue usado.", true);
+
+  const session = await api("/api/session");
+  state.user = session.user;
+  state.events = session.events;
+  state.organizations = session.organizations || [];
+  if (state.user) await loadDashboard();
+}
+
+async function loadDashboard() {
+  const session = await api("/api/session");
+  state.user = session.user;
+  state.events = session.events;
+  state.organizations = session.organizations || [];
+  if (state.user.role === "organization") {
+    const stats = await api("/api/organization/stats");
+    state.orgStats = stats.stats;
+    state.tickets = [];
+    state.incomingTransfers = [];
+  } else {
+    const tickets = await api("/api/tickets");
+    state.tickets = tickets.tickets || [];
+    state.incomingTransfers = tickets.incomingTransfers || [];
+  }
+  $("#authView").style.display = "none";
+  $("#appView").style.display = "block";
+  $("#userLabel").textContent = `${state.user.organizationName || state.user.name} (${state.user.role === "organization" ? "organizacion" : "cliente"})`;
+  renderDashboard();
+}
+
+function renderDashboard() {
+  if (state.user.role === "organization") renderOrganization();
+  else renderUser();
+}
+
+function renderUser() {
+  $("#dashboard").innerHTML = `
+    <div class="hero-band">
+      <div><h1>Eventos disponibles</h1><p>Explora eventos creados por organizaciones, genera tus boletos y conserva la validación criptográfica de cada QR.</p></div>
+      <div class="crypto-box">AES protege tus datos. ECDSA y SHA-256 prueban autenticidad e integridad sin revelar tu identidad.</div>
+    </div>
+    <div class="grid">
+      <section class="panel span-7">
+        <h2>Próximos eventos</h2>
+        <p class="muted">${moneylessCopy()}</p>
+        <div class="event-tools">
+          <label><span>Buscar evento</span><input id="eventSearch" placeholder="Lupa: nombre, lugar u organización" value="${state.eventSearch}"></label>
+          <label><span>Por organizador</span><select id="organizationFilter">
+            <option value="">Todas las organizaciones</option>
+            ${state.organizations.map((org) => `<option value="${org.id}" ${state.organizationFilter === org.id ? "selected" : ""}>${org.name}</option>`).join("")}
+          </select></label>
+        </div>
+        <div id="eventList" class="event-list"></div>
+      </section>
+      <section class="panel span-5">
+        <h2>Transferencias recibidas</h2>
+        <div id="incomingTransferList" class="ticket-list"></div>
+      </section>
+      <section class="panel span-12">
+        <h2>Gestionar mis boletos</h2>
+        <div id="ticketList" class="ticket-list"></div>
+      </section>
+      <section class="panel span-12">
+        <h2>Validar boleto</h2>
+        <form id="validateForm" class="form inline-form">
+          <label><span>URL o código del QR</span><input name="code" placeholder="http://.../ticket/..."></label>
+          <button type="submit">Validar</button>
+        </form>
+        <div id="validationResult"></div>
+      </section>
+    </div>`;
+
+  $("#validateForm").addEventListener("submit", validateTicket);
+  $("#eventSearch").addEventListener("input", (event) => {
+    state.eventSearch = event.target.value;
+    renderEventList();
+  });
+  $("#organizationFilter").addEventListener("change", (event) => {
+    state.organizationFilter = event.target.value;
+    renderEventList();
+  });
+  renderEventList();
+  renderIncomingTransfers();
+  renderTicketList($("#ticketList"), state.tickets, false);
+}
+
+function ticketsOwnedForEvent(eventId) {
+  return state.tickets.filter((ticket) => ticket.eventId === eventId).length;
+}
+
+function renderEventList() {
+  const container = $("#eventList");
+  const query = state.eventSearch.trim().toLowerCase();
+  const events = state.events.filter((event) => {
+    const matchesSearch = !query || [event.name, event.venue, event.organizer].some((value) => String(value || "").toLowerCase().includes(query));
+    const matchesOrg = !state.organizationFilter || event.organizationId === state.organizationFilter;
+    return matchesSearch && matchesOrg;
+  });
+  if (!events.length) {
+    container.innerHTML = `<p class="muted">Aún no hay eventos proximos.</p>`;
+    return;
+  }
+  container.innerHTML = events.map((event) => {
+    const owned = ticketsOwnedForEvent(event.id);
+    return `
+      <article class="event-card">
+        <div>
+          <strong>${event.name}</strong>
+          <p class="muted">${event.date} ${event.time} · ${event.venue}</p>
+          <span class="pill">${event.organizer}</span>
+          <span class="pill">${formatPrice(event.price)}</span>
+          <p class="muted">${owned}/5 boletos generados para este evento</p>
+        </div>
+        <button data-buy="${event.id}" ${owned >= 5 ? "disabled" : ""}>Generar boleto</button>
+      </article>`;
+  }).join("");
+  container.onclick = async (event) => {
+    const id = event.target.dataset.buy;
+    if (!id) return;
+    const selected = state.events.find((item) => item.id === id);
+    if (ticketsOwnedForEvent(id) >= 5) return;
+    if (!confirm(`Generar boleto para ${selected.name} con costo de ${formatPrice(selected.price)}?`)) return;
+    await api("/api/tickets", { method: "POST", body: JSON.stringify({ eventId: id }) });
+    await loadDashboard();
+  };
+}
+
+function renderIncomingTransfers() {
+  const container = $("#incomingTransferList");
+  if (!state.incomingTransfers.length) {
+    container.innerHTML = `<p class="muted">No tienes boletos pendientes por aceptar.</p>`;
+    return;
+  }
+  container.innerHTML = state.incomingTransfers.map((ticket) => `
+    <article class="ticket-card">
+      <div class="ticket-head">
+        <div><strong>${ticket.publicClaims.eventName}</strong><p class="muted">${ticket.publicClaims.organizer}</p></div>
+        <span class="pill transfer_pending">Pendiente</span>
+      </div>
+      <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice)}</p>
+      <p class="muted">Expira: ${new Date(ticket.transfer.expiresAt).toLocaleString()}</p>
+      <div class="actions">
+        <button data-accept="${ticket.id}">Aceptar</button>
+        <button class="ghost" data-reject="${ticket.id}">Rechazar</button>
+      </div>
+    </article>`).join("");
+  container.onclick = async (event) => {
+    if (event.target.dataset.accept) {
+      await api(`/api/transfers/${event.target.dataset.accept}/accept`, { method: "POST" });
+      await loadDashboard();
+    }
+    if (event.target.dataset.reject) {
+      await api(`/api/transfers/${event.target.dataset.reject}/reject`, { method: "POST" });
+      await loadDashboard();
+    }
+  };
+}
+
+function renderOrganization() {
+  $("#dashboard").innerHTML = `
+    <div class="hero-band">
+      <div><h1>Panel de organización</h1><p>Crea eventos, consulta boletos emitidos por evento y usa el escáner para validar acceso con datos del comprador solo al momento de revisar el QR.</p></div>
+      <div class="crypto-box">La organización no lista compradores; los datos AES se descifran solo durante la validacion del boleto.</div>
+    </div>
+    <div class="grid">
+      <section class="panel span-5">
+        <h2>Crear evento</h2>
+        <form id="eventForm" class="form">
+          <div class="actions"><button type="button" id="randomEvent" class="secondary">Generar evento aleatorio</button></div>
+          <label><span>Nombre del evento</span><input name="name" required placeholder="Festival Cultura Abierta"></label>
+          <label><span>Fecha</span><input name="date" type="date" required></label>
+          <label><span>Hora</span><input name="time" type="time" required></label>
+          <label><span>Lugar</span><input name="venue" required placeholder="Foro cultural"></label>
+          <label><span>Organización visible</span><input name="organizer" placeholder="${state.user.organizationName || state.user.name}"></label>
+          <button type="submit">Publicar evento</button>
+        </form>
+      </section>
+      <section class="panel span-7">
+        <h2>Boletos emitidos</h2>
+        <div id="orgStats" class="stats-grid"></div>
+      </section>
+      <section class="panel span-6">
+        <h2>Verificar boleto</h2>
+        <form id="orgValidateForm" class="form">
+          <label><span>URL o código del QR</span><input name="code" placeholder="Pega aquí el contenido escaneado"></label>
+          <button type="submit">Ver datos y firma</button>
+        </form>
+        <div id="orgResult"></div>
+      </section>
+      <section class="panel span-6 scan-box">
+        <h2>Escáner de acceso</h2>
+        <video id="video" playsinline></video>
+        <div class="actions">
+          <button id="startScan" class="secondary">Activar cámara</button>
+          <button id="stopScan" class="ghost">Detener</button>
+        </div>
+        <p id="scanNotice" class="muted">Tambien puedes pegar manualmente el codigo en la verificación.</p>
+      </section>
+    </div>`;
+
+  $("#eventForm").addEventListener("submit", createEvent);
+  $("#randomEvent").addEventListener("click", fillRandomEvent);
+  $("#orgValidateForm").addEventListener("submit", validateTicket);
+  $("#startScan").addEventListener("click", startScanner);
+  $("#stopScan").addEventListener("click", stopScanner);
+  renderOrgStats();
+}
+
+function renderOrgStats() {
+  const container = $("#orgStats");
+  if (!state.orgStats.length) {
+    container.innerHTML = `<p class="muted">Aún no has creado eventos.</p>`;
+    return;
+  }
+  container.innerHTML = state.orgStats.map(({ event, total, valid, used, pendingTransfer }) => `
+    <article class="stat-card">
+      <strong>${event.name}</strong>
+      <p><strong>Costo:</strong> ${formatPrice(event.price)}</p>
+      <p class="muted">${event.date} ${event.time} · ${event.venue}</p>
+      <div class="stat-row"><span>Total emitidos</span><b>${total}</b></div>
+      <div class="stat-row"><span>Válidos</span><b>${valid}</b></div>
+      <div class="stat-row"><span>Usados</span><b>${used}</b></div>
+      <div class="stat-row"><span>En transferencia</span><b>${pendingTransfer}</b></div>
+      <button class="danger" data-delete-event="${event.id}">Eliminar evento</button>
+    </article>`).join("");
+  container.onclick = async (event) => {
+    const id = event.target.dataset.deleteEvent;
+    if (!id) return;
+    if (!confirm("¿Eliminar este evento de la base de datos?")) return;
+    await api(`/api/events/${id}`, { method: "DELETE" });
+    await loadDashboard();
+  };
+}
+
+async function createEvent(event) {
+  event.preventDefault();
+  await api("/api/events", { method: "POST", body: JSON.stringify(formData(event.target)) });
+  event.target.reset();
+  await loadDashboard();
+}
+
+async function fillRandomEvent() {
+  const event = await api("/api/events/random");
+  const form = $("#eventForm");
+  form.name.value = event.name;
+  form.date.value = event.date;
+  form.time.value = event.time;
+  form.venue.value = event.venue;
+  form.organizer.value = event.organizer;
+}
+
+function renderTicketList(container, tickets, organization) {
+  if (!tickets.length) {
+    container.innerHTML = `<p class="muted">Aún no hay boletos.</p>`;
+    return;
+  }
+  const template = $("#ticketTemplate");
+  container.innerHTML = "";
+  tickets.forEach((ticket) => {
+    const node = template.content.cloneNode(true);
+    $("[data-field=eventName]", node).textContent = ticket.publicClaims.eventName;
+    $("[data-field=date]", node).textContent = `${ticket.publicClaims.eventDate} ${ticket.publicClaims.eventTime} · ${ticket.publicClaims.venue} · ${ticket.publicClaims.organizer}`;
+    const status = $("[data-field=status]", node);
+    status.textContent = statusText(ticket.status);
+    status.classList.add(ticket.status);
+    const actions = $("[data-field=actions]", node);
+    actions.innerHTML = `
+      <span class="pill">${formatPrice(ticket.publicClaims.price || ticket.purchasePrice)}</span>
+      <a class="button secondary" href="${ticket.pdfUrl}" target="_blank">PDF</a>
+      <a class="button secondary" href="/ticket/${ticket.publicCode}" target="_blank">QR web</a>
+      <button class="ghost" data-copy="${ticket.qrUrl}">Copiar URL QR</button>
+      <button data-transfer="${ticket.publicCode}" ${ticket.status !== "valid" ? "disabled" : ""}>Transferir</button>
+      <button class="secondary" data-delete="${ticket.publicCode}">Eliminar boleto</button>
+      ${ticket.transfer ? `<span class="pill transfer_pending">Enviado a ${ticket.transfer.toEmail}</span>` : ""}
+      ${organization ? `<button data-check="${ticket.publicCode}">Verificar</button><button class="danger" data-admit="${ticket.publicCode}">Permitir acceso</button>` : ""}
+    `;
+    actions.addEventListener("click", handleTicketAction);
+    container.appendChild(node);
+  });
+}
+
+async function handleTicketAction(event) {
+  const target = event.target;
+  if (target.dataset.copy) {
+    await navigator.clipboard.writeText(target.dataset.copy);
+    target.textContent = "Copiado";
+  }
+  if (target.dataset.transfer) await askTransfer(target.dataset.transfer);
+  if (target.dataset.delete) {
+    if (!confirm("¿Eliminar permanentemente este boleto y su PDF? Esta accion no se puede deshacer.")) return;
+    await api(`/api/tickets/${target.dataset.delete}/delete`, { method: "POST" });
+    await loadDashboard();
+  }
+  if (target.dataset.check) await showTicket(target.dataset.check, "#orgResult");
+  if (target.dataset.admit) await admitTicket(target.dataset.admit, "#orgResult");
+}
+
+async function askTransfer(code) {
+  const email = prompt("Correo registrado de la persona que recibirá el boleto:");
+  if (!email) return;
+  try {
+    await api(`/api/tickets/${encodeURIComponent(code)}/transfer`, { method: "POST", body: JSON.stringify({ email }) });
+    await loadDashboard();
+  } catch (error) {
+    alert(error.message);
+  }
+}
+
+async function validateTicket(event) {
+  event.preventDefault();
+  const code = ticketCodeFromInput(formData(event.target).code);
+  const target = state.user.role === "organization" ? "#orgResult" : "#validationResult";
+  await showTicket(code, target);
+}
+
+async function showTicket(code, targetSelector) {
+  const { ticket } = await api(`/api/tickets/${encodeURIComponent(code)}`);
+  $(targetSelector).innerHTML = ticketDetails(ticket, state.user.role === "organization");
+}
+
+async function admitTicket(code, targetSelector = "#orgResult") {
+  try {
+    const { ticket } = await api(`/api/organization/tickets/${encodeURIComponent(code)}/admit`, { method: "POST" });
+    $(targetSelector).innerHTML = ticketDetails(ticket, true);
+    await loadDashboard();
+  } catch (error) {
+    $(targetSelector).innerHTML = `<p class="notice" style="color:var(--bad)">${error.message}</p>`;
+  }
+}
+
+function ticketDetails(ticket, organization = false) {
+  const verification = ticket.verification || {};
+  return `
+    <article class="ticket-card" style="margin-top:14px">
+      <div class="ticket-head"><strong>${ticket.publicClaims.eventName}</strong><span class="pill ${ticket.status}">${statusText(ticket.status)}</span></div>
+      <p class="muted">${ticket.publicClaims.eventDate} ${ticket.publicClaims.eventTime} · ${ticket.publicClaims.venue}</p>
+      <p><strong>Organización:</strong> ${ticket.publicClaims.organizer}</p>
+      <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice)}</p>
+      <div class="status-line">
+        <span class="pill ${verification.authentic ? "valid" : "tampered"}">${verification.authentic ? "Firma auténtica" : "Firma inválida"}</span>
+        <span class="pill ${verification.hashMatches ? "valid" : "tampered"}">${verification.hashMatches ? "Hash coincide" : "Hash alterado"}</span>
+      </div>
+      ${ticket.qrDataUrl ? `<img class="qr" src="${ticket.qrDataUrl}" alt="Codigo QR">` : ""}
+      ${organization && ticket.holder ? `<p><strong>Comprador:</strong> ${ticket.holder.name} · ${ticket.holder.email}</p>` : `<p class="muted">Datos personales protegidos con AES. No se muestran en validación pública.</p>`}
+      <div class="crypto-box">SHA-256: ${ticket.crypto.hash}<br>Firma ECDSA: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
+      ${organization && ticket.traceability ? traceabilityDetails(ticket.traceability) : ""}
+      ${organization && ticket.status === "valid" ? `<button class="danger" onclick="admitTicket('${ticket.publicCode}')">Permitir acceso y consumir boleto</button>` : ""}
+    </article>`;
+}
+
+function traceabilityDetails(traceability) {
+  return `
+    <details class="trace-box" open>
+      <summary>Trazabilidad del boleto</summary>
+      <ol>
+        ${traceability.map((item) => `<li><strong>${item.label}</strong><br><span class="muted">${new Date(item.at).toLocaleString()} · ${item.detail}</span></li>`).join("")}
+      </ol>
+    </details>`;
+}
+
+let stream;
+let scanTimer;
+
+async function startScanner() {
+  const notice = $("#scanNotice");
+  if (!("BarcodeDetector" in window)) {
+    notice.textContent = "Este navegador no soporta BarcodeDetector. Usa el campo manual para la demo.";
+    return;
+  }
+  stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+  const video = $("#video");
+  video.srcObject = stream;
+  await video.play();
+  const detector = new BarcodeDetector({ formats: ["qr_code"] });
+  scanTimer = setInterval(async () => {
+    const codes = await detector.detect(video).catch(() => []);
+    if (codes[0]) {
+      const code = ticketCodeFromInput(codes[0].rawValue);
+      notice.textContent = `QR detectado: ${code}`;
+      await showTicket(code, "#orgResult");
+      stopScanner();
+    }
+  }, 700);
+}
+
+function stopScanner() {
+  clearInterval(scanTimer);
+  if (stream) stream.getTracks().forEach((track) => track.stop());
+  stream = null;
+}
+
+init().catch((error) => setNotice(error.message, true));

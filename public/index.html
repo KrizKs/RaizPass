@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>RaizPass Eventos</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main id="authView" class="shell">
+      <section class="brand-panel">
+        <div>
+          <div class="brand-mark"><span class="logo">RP</span><span>RaizPass</span></div>
+          <h1>Intermediario seguro para eventos globales con boletos privados</h1>
+          <p>Organizaciones publican eventos y clientes gestionan boletos verificables con AES, SHA-256, ECDSA y códigos QR.</p>
+          <div class="crypto-strip">
+            <div class="metric"><strong>AES</strong><span>Datos sensibles cifrados</span></div>
+            <div class="metric"><strong>ECDSA</strong><span>Firma digital verificable</span></div>
+            <div class="metric"><strong>QR</strong><span>Validación pública</span></div>
+          </div>
+        </div>
+        <!-- <p>Cuenta organizacion de pruebas: <strong>admin@expo.test</strong> / <strong>Admin123!</strong></p> -->
+        <p style="text-align: center; font-size: 22px; font-style: oblique;"><strong>Tu boleto, tu seguridad.</strong></p>
+      </section>
+
+      <section class="auth-panel">
+        <div class="auth-box">
+          <div class="tabs">
+            <button class="active" data-tab="login">Iniciar</button>
+            <button data-tab="register">Crear cuenta</button>
+            <button data-tab="forgot">Reestablecer</button>
+          </div>
+
+          <form id="loginForm" class="form auth-form">
+            <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
+            <label><span>Contraseña</span><input name="password" type="password" required minlength="8" placeholder="Mínimo 8 caracteres"></label>
+            <button type="submit">Entrar</button>
+          </form>
+
+          <form id="registerForm" class="form auth-form hidden">
+            <label><span>Nombre completo</span><input name="name" required minlength="3" placeholder="Nombre Apellido"></label>
+            <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
+            <label><span>Contraseña</span><input name="password" type="password" required minlength="8" placeholder="Mínimo 8 caracteres"></label>
+            <button type="submit">Crear y enviar validación</button>
+          </form>
+
+          <form id="forgotForm" class="form auth-form hidden">
+            <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
+            <button type="submit">Enviar recuperación</button>
+          </form>
+
+          <p id="authNotice" class="notice"></p>
+        </div>
+      </section>
+    </main>
+
+    <main id="appView" class="app">
+      <header class="topbar">
+        <div class="brand-mark"><span class="logo">RP</span><span>RaizPass</span></div>
+        <div><span id="userLabel" class="muted"></span> <button id="logoutBtn" class="secondary">Salir</button></div>
+      </header>
+      <section id="dashboard" class="dashboard"></section>
+    </main>
+
+    <template id="ticketTemplate">
+      <article class="ticket-card">
+        <div class="ticket-head">
+          <div>
+            <strong data-field="eventName"></strong>
+            <div class="muted" data-field="date"></div>
+          </div>
+          <span class="pill" data-field="status"></span>
+        </div>
+        <div class="actions" data-field="actions"></div>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

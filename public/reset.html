@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Reestablecer contraseña | RaizPass</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body class="public-page">
+    <main class="auth-box">
+      <div class="brand-mark"><span class="logo">RP</span><span>RaizPass</span></div>
+      <h1>Reestablecer contraseña</h1>
+      <form id="resetForm" class="form">
+        <label><span>Nueva contraseña</span><input name="password" type="password" minlength="8" required placeholder="Mínimo 8 caracteres"></label>
+        <button type="submit">Actualizar contraseña</button>
+      </form>
+      <p id="notice" class="notice"></p>
+    </main>
+    <script>
+      const token = new URLSearchParams(location.search).get("token");
+      const notice = document.querySelector("#notice");
+      document.querySelector("#resetForm").addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const password = new FormData(event.target).get("password");
+        const response = await fetch("/api/auth/reset", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token, password }),
+        });
+        const data = await response.json();
+        if (!response.ok) {
+          notice.style.color = "var(--bad)";
+          notice.textContent = data.error || "No se pudo reestablecer.";
+          return;
+        }
+        notice.style.color = "var(--blue-850)";
+        notice.innerHTML = 'Contraseña actualizada. <a href="/">Inicia sesión</a>.';
+      });
+    </script>
+  </body>
+</html>

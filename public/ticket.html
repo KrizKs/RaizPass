@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Validación de boleto | RaizPass</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body class="public-page">
+    <main class="ticket-public">
+      <div class="brand-mark"><span class="logo">RP</span><span>RaizPass</span></div>
+      <div id="content"><p class="muted">Validando boleto...</p></div>
+      <p class="muted">Esta vista pública no revela nombre, correo ni datos sensibles del comprador.</p>
+    </main>
+    <script>
+      const code = location.pathname.split("/").pop();
+      const content = document.querySelector("#content");
+      function statusText(status) {
+        return { valid: "Válido", used: "Usado", expired: "Expirado", tampered: "Alterado", transfer_pending: "Transferencia pendiente" }[status] || status;
+      }
+      function formatPrice(value) {
+        return `$${Number(value || 0).toFixed(0)} MXN`;
+      }
+      fetch(`/api/tickets/${encodeURIComponent(code)}`)
+        .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+          if (!ok) throw new Error(data.error || "Boleto no encontrado.");
+          const ticket = data.ticket;
+          const verification = ticket.verification || {};
+          content.innerHTML = `
+            <h1>${ticket.publicClaims.eventName}</h1>
+            <p>${ticket.publicClaims.eventDate} ${ticket.publicClaims.eventTime} · ${ticket.publicClaims.venue}</p>
+            <p><strong>Organización:</strong> ${ticket.publicClaims.organizer}</p>
+            <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice)}</p>
+            <div class="status-line">
+              <span class="pill ${ticket.status}">${statusText(ticket.status)}</span>
+              <span class="pill ${verification.authentic ? "valid" : "tampered"}">${verification.authentic ? "Firma auténtica" : "Firma invalida"}</span>
+              <span class="pill ${verification.hashMatches ? "valid" : "tampered"}">${verification.hashMatches ? "Hash íntegro" : "Hash alterado"}</span>
+            </div>
+            <div class="crypto-box">Código: ${ticket.publicClaims.ticketCode}<br>SHA-256: ${ticket.crypto.hash}<br>Firma ECDSA: ${ticket.crypto.signature.slice(0, 96)}...</div>
+          `;
+        })
+        .catch((error) => {
+          content.innerHTML = `<h1>No se pudo validar</h1><p class="notice" style="color:var(--bad)">${error.message}</p>`;
+        });
+    </script>
+  </body>
+</html>
