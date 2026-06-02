@@ -81,7 +81,7 @@ a {
 
 .crypto-strip {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-top: 34px;
 }
@@ -291,6 +291,19 @@ select {
   gap: 12px;
 }
 
+.event-list {
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(280px, 32%);
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  scroll-snap-type: inline mandatory;
+  padding-bottom: 8px;
+}
+
+.event-list .event-card {
+  scroll-snap-align: start;
+}
+
 .event-tools {
   display: grid;
   grid-template-columns: 1fr minmax(220px, 0.55fr);
@@ -437,6 +450,10 @@ select {
 
   .grid {
     grid-template-columns: 1fr;
+  }
+
+  .event-list {
+    grid-auto-columns: minmax(260px, 86%);
   }
 
   .span-4,
