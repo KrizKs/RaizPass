@@ -123,6 +123,7 @@ async function ensurePostgres() {
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 const PgSession = connectPgSimple(session);
+app.set("trust proxy", 1);
 app.use(
   session({
     store: pool ? new PgSession({ pool, tableName: "user_sessions", createTableIfMissing: true }) : undefined,
