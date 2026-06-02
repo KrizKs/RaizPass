@@ -216,20 +216,27 @@ function migrateDb(db) {
     org.organizationName = orgInfo.name;
     org.verified = true;
   }
-  if (db.meta?.seedVersion !== 4) {
+  db.meta ||= {};
+  // En PostgreSQL no se deben reescribir los eventos en cada arranque.
+  // La version anterior guardaba la metadata como meta.state.seedVersion y el migrador
+  // buscaba meta.seedVersion, por lo que reiniciaba los eventos semilla en cada loadDb().
+  // Eso provocaba que los eventos creados no aparecieran y que las eliminaciones no persistieran.
+  if (!db.events.length) {
     db.events = seedEventsV2();
-    db.meta ||= {};
-    db.meta.seedVersion = 4;
-  } else {
-    db.events = db.events.map((event) => ({
+  }
+  db.events = db.events.map((event) => {
+    const normalized = normalizePrice(event.price, event.currency);
+    return {
       ...event,
       organizer: event.organizer || organizationName(db, event.organizationId),
-      price: normalizePrice(event.price, event.currency).amount,
-      currency: normalizePrice(event.price, event.currency).currency,
-      priceMxn: normalizePrice(event.price, event.currency).mxn,
+      price: normalized.amount,
+      currency: normalized.currency,
+      priceMxn: event.priceMxn ?? normalized.mxn,
+      status: event.status || "active",
       createdAt: event.createdAt || new Date().toISOString(),
-    }));
-  }
+    };
+  });
+  db.meta.seedVersion = Math.max(Number(db.meta.seedVersion || 0), 5);
   db.tickets = db.tickets.map((ticket) => ({
     ...ticket,
     eventId: ticket.eventId || db.events.find((event) => event.name === ticket.publicClaims?.eventName)?.id || db.events[0]?.id,
@@ -440,7 +447,7 @@ async function readPostgresDb() {
       publicKeyPem: getServerKeys().publicKey.export({ type: "spki", format: "pem" }),
       privateKeyPem: getServerKeys().privateKey.export({ type: "pkcs8", format: "pem" }),
     },
-    meta: Object.fromEntries(meta.rows.map((row) => [row.key, row.value])),
+    meta: meta.rows.find((row) => row.key === "state")?.value || Object.fromEntries(meta.rows.map((row) => [row.key, row.value])),
   };
 }
 
@@ -751,9 +758,12 @@ async function sendAppEmail(to, subject, title, body, actionText, actionUrl) {
       port: smtpPort,
       secure: smtpSecure,
       auth: { user: smtpUser, pass: smtpPass },
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
+      family: 4,
+      requireTLS: !smtpSecure,
+      tls: { servername: smtpHost },
+      connectionTimeout: 20000,
+      greetingTimeout: 20000,
+      socketTimeout: 30000,
     });
     await transporter.sendMail({
       from: process.env.MAIL_FROM || process.env.SMTP_FROM || `RaizPass <${smtpUser}>`,
@@ -781,6 +791,16 @@ Vista: ${filePath}
   throw new Error("SMTP no configurado. Define SMTP_USER/SMTP_PASS o MAIL_USER/MAIL_PASS en Railway.");
 }
 
+async function trySendAppEmail(context, ...args) {
+  try {
+    await sendAppEmail(...args);
+    return { ok: true };
+  } catch (error) {
+    console.error(`[SMTP ${context}]`, error);
+    return { ok: false, error };
+  }
+}
+
 async function removeIfExists(filePath) {
   if (!filePath) return;
   try {
@@ -803,6 +823,7 @@ app.get("/api/session", async (req, res) => {
     .filter((item) => item.role === "organization")
     .map((item) => ({ id: item.id, name: item.organizationName || item.name, email: item.email }));
   const events = db.events
+    .filter((event) => event.status !== "deleted")
     .filter((event) => !user || user.role !== "organization" || event.organizationId === user.id)
     .filter((event) => new Date(`${event.date}T23:59:59`).getTime() >= Date.now())
     .sort((a, b) => `${a.date} ${a.time}`.localeCompare(`${b.date} ${b.time}`));
@@ -820,15 +841,15 @@ app.post("/api/auth/register", async (req, res) => {
   const existing = db.users.find((user) => user.email.toLowerCase() === normalizedEmail);
   if (existing) {
     if (existing.role === "user" && !existing.verified) {
+      const previousToken = existing.verificationToken;
       existing.verificationToken = nanoid(36);
-      await writeDb(db);
-      try {
-        await sendAppEmail(existing.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${existing.verificationToken}`);
-        return res.json({ ok: true, message: "Ese correo ya estaba registrado sin verificar. Enviamos un nuevo enlace de confirmacion." });
-      } catch (error) {
-        console.error("[SMTP registro existente]", error);
-        return res.status(502).json({ error: `El usuario existe, pero no se pudo enviar el correo: ${error.message}` });
+      const emailResult = await trySendAppEmail("registro existente", existing.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${existing.verificationToken}`);
+      if (!emailResult.ok) {
+        existing.verificationToken = previousToken;
+        return res.status(502).json({ error: `No se pudo reenviar el correo de verificación: ${emailResult.error.message}` });
       }
+      await writeDb(db);
+      return res.json({ ok: true, message: "Ese correo ya estaba registrado sin verificar. Enviamos un nuevo enlace de confirmacion." });
     }
     return res.status(409).json({ error: "Ese correo ya esta registrado." });
   }
@@ -850,19 +871,19 @@ app.post("/api/auth/register", async (req, res) => {
     verificationToken: isDemoOrganization ? undefined : token,
     createdAt: new Date().toISOString(),
   };
-  db.users.push(user);
-  await writeDb(db);
   if (isDemoOrganization) {
+    db.users.push(user);
+    await writeDb(db);
     return res.json({ ok: true, message: "Organizacion demo creada y verificada automaticamente." });
   }
 
-  try {
-    await sendAppEmail(user.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${token}`);
-    res.json({ ok: true, message: "Cuenta creada. Revisa tu correo para confirmar la cuenta." });
-  } catch (error) {
-    console.error("[SMTP registro]", error);
-    res.status(502).json({ error: `Cuenta creada, pero no se pudo enviar el correo: ${error.message}` });
+  const emailResult = await trySendAppEmail("registro", user.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${token}`);
+  if (!emailResult.ok) {
+    return res.status(502).json({ error: `No se creó la cuenta porque no se pudo enviar el correo de verificación: ${emailResult.error.message}` });
   }
+  db.users.push(user);
+  await writeDb(db);
+  res.json({ ok: true, message: "Cuenta creada. Revisa tu correo para confirmar la cuenta." });
 });
 
 app.get("/verify-email", async (req, res) => {
@@ -901,13 +922,13 @@ app.post("/api/auth/forgot", async (req, res) => {
   if (user) {
     user.resetToken = nanoid(36);
     user.resetExpires = Date.now() + 1000 * 60 * 30;
-    await writeDb(db);
-    try {
-      await sendAppEmail(user.email, "Restablece tu contrasena", "Restablecimiento seguro", "Recibimos una solicitud para cambiar tu contrasena. El enlace expira en 30 minutos.", "Cambiar contrasena", `${BASE_URL}/reset-password?token=${user.resetToken}`);
-    } catch (error) {
-      console.error("[SMTP recuperacion]", error);
-      return res.status(502).json({ error: `No se pudo enviar el correo de recuperacion: ${error.message}` });
+    const emailResult = await trySendAppEmail("recuperacion", user.email, "Restablece tu contrasena", "Restablecimiento seguro", "Recibimos una solicitud para cambiar tu contrasena. El enlace expira en 30 minutos.", "Cambiar contrasena", `${BASE_URL}/reset-password?token=${user.resetToken}`);
+    if (!emailResult.ok) {
+      delete user.resetToken;
+      delete user.resetExpires;
+      return res.status(502).json({ error: `No se pudo enviar el correo de recuperacion: ${emailResult.error.message}` });
     }
+    await writeDb(db);
   }
   res.json({ ok: true, message: "Si el correo existe, recibirás un enlace de recuperación." });
 });
@@ -967,14 +988,15 @@ app.delete("/api/events/:id", requireAuth, requireOrganization, async (req, res)
     ticket.cancelledAt = new Date().toISOString();
     ticket.accessLog = [...(ticket.accessLog || []), { by: req.session.userId, at: ticket.cancelledAt, action: "evento_cancelado" }];
   }
-  db.events.splice(index, 1);
+  db.events[index].status = "deleted";
+  db.events[index].deletedAt = new Date().toISOString();
   await writeDb(db);
   res.json({ ok: true });
 });
 
 app.get("/api/organization/stats", requireAuth, requireOrganization, async (req, res) => {
   const db = await loadDb();
-  const events = db.events.filter((event) => event.organizationId === req.session.userId);
+  const events = db.events.filter((event) => event.organizationId === req.session.userId && event.status !== "deleted");
   const stats = events.map((event) => {
     const tickets = db.tickets.filter((ticket) => ticket.eventId === event.id);
     return {
@@ -1167,8 +1189,8 @@ app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, re
       createdAt: Date.now(),
     };
     await writeDb(db);
-    await sendAppEmail(recipient.email, "Recibiste un boleto firmado", "Boleto firmado recibido", `Recibiste un boleto firmado para ${ticket.publicClaims.eventName}. El QR conserva la responsabilidad criptografica del firmante original.`, "Ver mis boletos", BASE_URL);
-    return res.json({ ticket: summarizeTicket(ticket, db) });
+    const emailResult = await trySendAppEmail("transferencia firmada", recipient.email, "Recibiste un boleto firmado", "Boleto firmado recibido", `Recibiste un boleto firmado para ${ticket.publicClaims.eventName}. El QR conserva la responsabilidad criptografica del firmante original.`, "Ver mis boletos", BASE_URL);
+    return res.json({ ticket: summarizeTicket(ticket, db), emailWarning: emailResult.ok ? null : emailResult.error.message });
   }
   ticket.transfer = {
     id: nanoid(12),
@@ -1181,8 +1203,8 @@ app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, re
     expiresAt: Date.now() + TRANSFER_TTL_MS,
   };
   await writeDb(db);
-  await sendAppEmail(recipient.email, "Te enviaron un boleto", "Transferencia de boleto", `Tienes 24 horas para aceptar el boleto de ${ticket.publicClaims.eventName}.`, "Entrar y aceptar", BASE_URL);
-  res.json({ ticket: summarizeTicket(ticket, db) });
+  const emailResult = await trySendAppEmail("transferencia", recipient.email, "Te enviaron un boleto", "Transferencia de boleto", `Tienes 24 horas para aceptar el boleto de ${ticket.publicClaims.eventName}.`, "Entrar y aceptar", BASE_URL);
+  res.json({ ticket: summarizeTicket(ticket, db), emailWarning: emailResult.ok ? null : emailResult.error.message });
 });
 
 app.post("/api/transfers/:ticketId/accept", requireAuth, requireUser, async (req, res) => {
