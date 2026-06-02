@@ -1,0 +1,9 @@
+node_modules/
+data/db.json
+storage/tickets/*.pdf
+storage/email-previews/*.html
+server.out.log
+server.err.log
+cookies.txt
+_propuesta_text.txt
+_documentacion_text.txt
