@@ -120,10 +120,10 @@ async function ensurePostgres() {
   `);
 }
 
+app.set("trust proxy", 1);
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
 const PgSession = connectPgSimple(session);
-app.set("trust proxy", 1);
 app.use(
   session({
     store: pool ? new PgSession({ pool, tableName: "user_sessions", createTableIfMissing: true }) : undefined,
@@ -739,42 +739,55 @@ async function refreshTicketCrypto(db, ticket, owner) {
   ticket.pdfUrl = await createTicketPdf(ticket, ticket.qrDataUrl);
 }
 
-async function sendPreviewEmail(to, subject, title, body, actionText, actionUrl) {
+async function sendAppEmail(to, subject, title, body, actionText, actionUrl) {
   const html = `<!doctype html>
   <html lang="es"><meta charset="utf-8"><body style="margin:0;background:#C1D7AE;font-family:Arial,sans-serif;color:#4C4842">
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:32px">
   <table role="presentation" width="560" cellpadding="0" cellspacing="0" style="max-width:560px;background:#FFFFFF;border-radius:16px;overflow:hidden;border:1px solid #82B979">
-  <tr><td style="background:#4C4842;color:#FFFFFF;padding:24px 28px"><h1 style="margin:0;font-size:22px">${title}</h1><p style="margin:8px 0 0;color:#E3CC8C">Intermediario seguro de eventos</p></td></tr>
+  <tr><td style="background:#4C4842;color:#FFFFFF;padding:24px 28px"><h1 style="margin:0;font-size:22px">${title}</h1><p style="margin:8px 0 0;color:#E3CC8C">RaizPass · Intermediario seguro de eventos</p></td></tr>
   <tr><td style="padding:28px"><p style="font-size:16px;line-height:1.55">${body}</p>
   <p style="margin:28px 0"><a href="${actionUrl}" style="background:#82B979;color:#1f241f;text-decoration:none;padding:13px 18px;border-radius:10px;font-weight:bold">${actionText}</a></p>
-  <p style="font-size:12px;color:#6d685f;word-break:break-all">${actionUrl}</p></td></tr>
+  <p style="font-size:12px;color:#6d685f;word-break:break-all">${actionUrl}</p>
+  <p style="font-size:12px;color:#6d685f">Si no solicitaste este correo, puedes ignorarlo.</p></td></tr>
   </table></td></tr></table></body></html>`;
-  const safeName = `${Date.now()}-${to.replace(/[^a-z0-9]/gi, "_")}.html`;
-  const filePath = path.join(EMAIL_DIR, safeName);
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+
+  const smtpUser = process.env.SMTP_USER || process.env.MAIL_USER;
+  const smtpPass = process.env.SMTP_PASS || process.env.MAIL_PASS;
+  const smtpHost = process.env.SMTP_HOST || (smtpUser?.includes("gmail.com") ? "smtp.gmail.com" : undefined);
+  const smtpPort = Number(process.env.SMTP_PORT || 587);
+  const smtpSecure = process.env.SMTP_SECURE === "true" || smtpPort === 465;
+
+  if (smtpHost && smtpUser && smtpPass) {
     const nodemailer = await import("nodemailer");
     const transporter = nodemailer.default.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: process.env.SMTP_SECURE === "true",
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+      host: smtpHost,
+      port: smtpPort,
+      secure: smtpSecure,
+      auth: { user: smtpUser, pass: smtpPass },
     });
     await transporter.sendMail({
-      from: process.env.MAIL_FROM || process.env.SMTP_USER,
+      from: process.env.MAIL_FROM || `RaizPass <${smtpUser}>`,
       to,
       subject,
       html,
     });
     return null;
   }
+
   if (process.env.NODE_ENV !== "production") {
+    const safeName = `${Date.now()}-${to.replace(/[^a-z0-9]/gi, "_")}.html`;
+    const filePath = path.join(EMAIL_DIR, safeName);
     await fs.mkdir(EMAIL_DIR, { recursive: true });
     await fs.writeFile(filePath, html, "utf8");
-    console.log(`\n[Correo desarrollo] ${subject} para ${to}\n${actionUrl}\nVista: ${filePath}\n`);
+    console.log(`
+[Correo desarrollo] ${subject} para ${to}
+${actionUrl}
+Vista: ${filePath}
+`);
     return filePath;
   }
-  console.log(`[Correo no enviado: configura SMTP] ${subject} para ${to}: ${actionUrl}`);
-  return null;
+
+  throw new Error("SMTP no configurado. Define SMTP_USER/SMTP_PASS o MAIL_USER/MAIL_PASS en Railway.");
 }
 
 async function removeIfExists(filePath) {
@@ -837,10 +850,10 @@ app.post("/api/auth/register", async (req, res) => {
   if (isDemoOrganization) {
     return res.json({ ok: true, message: "Organizacion demo creada y verificada automaticamente." });
   }
-  const verificationEmailPath = await sendPreviewEmail(user.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${token}`);
+  const verificationEmailPath = await sendAppEmail(user.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${token}`);
   user.verificationEmailPath = verificationEmailPath;
   await writeDb(db);
-  res.json({ ok: true, message: "Cuenta creada. Revisa la consola o storage/email-previews para abrir el correo simulado." });
+  res.json({ ok: true, message: "Cuenta creada. Revisa tu correo para confirmar la cuenta." });
 });
 
 app.get("/verify-email", async (req, res) => {
@@ -880,9 +893,9 @@ app.post("/api/auth/forgot", async (req, res) => {
     user.resetToken = nanoid(36);
     user.resetExpires = Date.now() + 1000 * 60 * 30;
     await writeDb(db);
-    await sendPreviewEmail(user.email, "Restablece tu contrasena", "Restablecimiento seguro", "Recibimos una solicitud para cambiar tu contrasena. El enlace expira en 30 minutos.", "Cambiar contrasena", `${BASE_URL}/reset-password?token=${user.resetToken}`);
+    await sendAppEmail(user.email, "Restablece tu contrasena", "Restablecimiento seguro", "Recibimos una solicitud para cambiar tu contrasena. El enlace expira en 30 minutos.", "Cambiar contrasena", `${BASE_URL}/reset-password?token=${user.resetToken}`);
   }
-  res.json({ ok: true, message: "Si el correo existe, se genero un correo de recuperacion simulado." });
+  res.json({ ok: true, message: "Si el correo existe, recibirás un enlace de recuperación." });
 });
 
 app.get("/reset-password", (req, res) => res.sendFile(path.join(__dirname, "public", "reset.html")));
@@ -911,7 +924,8 @@ app.post("/api/events", requireAuth, requireOrganization, async (req, res) => {
   const org = db.users.find((user) => user.id === req.session.userId);
   const { name, date, time, venue, organizer, price, currency } = req.body;
   if (!name || !date || !time || !venue) return res.status(400).json({ error: "Completa los datos del evento." });
-  const normalizedPrice = normalizePrice(price || randomPrice(currency || "MXN", org.id), currency || "MXN");
+  if (!price || Number(price) <= 0) return res.status(400).json({ error: "Ingresa un precio válido para el boleto." });
+  const normalizedPrice = normalizePrice(price, currency || "MXN");
   const event = {
     id: nanoid(12),
     organizationId: org.id,
@@ -1110,7 +1124,7 @@ app.post("/api/tickets/:code/delete", requireAuth, requireUser, async (req, res)
 
 app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, res) => {
   const db = await loadDb();
-  const ticket = db.tickets.find((item) => (item.publicCode === req.params.code || item.id === req.params.code) && item.ownerId === req.session.userId);
+  const ticket = db.tickets.find((item) => (item.publicCode === req.params.code || item.id === req.params.code || item.visibleCode === String(req.params.code).toUpperCase()) && item.ownerId === req.session.userId);
   if (!ticket) return res.status(404).json({ error: "Boleto no encontrado." });
   if (effectiveStatus(ticket, db.events) !== "valid") return res.status(400).json({ error: "Solo puedes transferir boletos validos." });
   if (!validateEmail(req.body.email)) return res.status(400).json({ error: "Correo destino invalido." });
@@ -1139,7 +1153,7 @@ app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, re
       createdAt: Date.now(),
     };
     await writeDb(db);
-    await sendPreviewEmail(recipient.email, "Recibiste un boleto firmado", "Boleto firmado recibido", `Recibiste un boleto firmado para ${ticket.publicClaims.eventName}. El QR conserva la responsabilidad criptografica del firmante original.`, "Ver mis boletos", BASE_URL);
+    await sendAppEmail(recipient.email, "Recibiste un boleto firmado", "Boleto firmado recibido", `Recibiste un boleto firmado para ${ticket.publicClaims.eventName}. El QR conserva la responsabilidad criptografica del firmante original.`, "Ver mis boletos", BASE_URL);
     return res.json({ ticket: summarizeTicket(ticket, db) });
   }
   ticket.transfer = {
@@ -1153,7 +1167,7 @@ app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, re
     expiresAt: Date.now() + TRANSFER_TTL_MS,
   };
   await writeDb(db);
-  await sendPreviewEmail(recipient.email, "Te enviaron un boleto", "Transferencia de boleto", `Tienes 24 horas para aceptar el boleto de ${ticket.publicClaims.eventName}.`, "Entrar y aceptar", BASE_URL);
+  await sendAppEmail(recipient.email, "Te enviaron un boleto", "Transferencia de boleto", `Tienes 24 horas para aceptar el boleto de ${ticket.publicClaims.eventName}.`, "Entrar y aceptar", BASE_URL);
   res.json({ ticket: summarizeTicket(ticket, db) });
 });
 
