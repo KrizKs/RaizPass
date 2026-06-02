@@ -14,8 +14,13 @@ const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
 function setNotice(text, isError = false) {
   const notice = $("#authNotice");
+  if (!notice) return;
   notice.textContent = text || "";
   notice.style.color = isError ? "var(--bad)" : "var(--earth)";
+}
+
+function ticketPdfUrl(ticket) {
+  return ticket.pdfUrl || (ticket.publicCode ? `/api/tickets/${encodeURIComponent(ticket.publicCode)}/pdf` : "#");
 }
 
 function clearAuthForms() {
@@ -39,7 +44,7 @@ async function api(url, options = {}) {
     ...options,
   });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || "Ocurrió un error.");
+  if (!response.ok) throw new Error(data.error || `Ocurrió un error (${response.status}). Revisa los logs del servidor.`);
   return data;
 }
 
@@ -414,8 +419,8 @@ function renderTicketList(container, tickets, organization) {
     const actions = $("[data-field=actions]", node);
     actions.innerHTML = `
       <span class="pill">${formatPrice(ticket.publicClaims.price || ticket.purchasePrice, ticket.publicClaims.currency || ticket.currency || "MXN")}</span>
-      <span class="pill">Código visible: ${ticket.visibleCode}</span>
-      <a class="button secondary" href="${ticket.pdfUrl}" target="_blank">PDF</a>
+      <span class="pill">Código visible: ${ticket.visibleCode || "No generado"}</span>
+      <a class="button secondary" href="${ticketPdfUrl(ticket)}" target="_blank" rel="noopener">PDF</a>
       ${!ticket.holderSignature ? `<button data-sign="${ticket.publicCode}" ${ticket.status !== "valid" ? "disabled" : ""}>Firmar con mi llave privada</button>` : `<span class="pill valid">Firmado por ${ticket.holderSignature.signerEmail}</span>`}
       <button data-transfer="${ticket.publicCode}" ${ticket.status !== "valid" ? "disabled" : ""}>Transferir</button>
       <button class="secondary" data-delete="${ticket.publicCode}">Eliminar boleto</button>

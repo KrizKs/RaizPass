@@ -471,3 +471,109 @@ select {
     flex-direction: column;
   }
 }
+
+/* Ajustes de producción: evita desbordamiento horizontal en móviles y tarjetas anchas. */
+html,
+body {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+img,
+video,
+canvas,
+svg {
+  max-width: 100%;
+}
+
+.shell,
+.auth-panel,
+.auth-box,
+.app,
+.topbar,
+.dashboard,
+.grid,
+.panel,
+.hero-band,
+.event-list,
+.ticket-list,
+.stats-grid,
+.event-card,
+.ticket-card,
+.stat-card,
+.actions,
+.crypto-box {
+  min-width: 0;
+}
+
+.tabs {
+  grid-template-columns: repeat(auto-fit, minmax(105px, 1fr));
+}
+
+.event-list {
+  width: 100%;
+  max-width: 100%;
+}
+
+.event-card,
+.ticket-card,
+.stat-card {
+  overflow-wrap: anywhere;
+}
+
+.actions > *,
+.event-card button,
+.ticket-card button,
+.ticket-card .button {
+  max-width: 100%;
+}
+
+@media (max-width: 640px) {
+  .auth-panel {
+    padding: 18px;
+  }
+
+  .auth-box,
+  .panel,
+  .ticket-public {
+    width: 100%;
+  }
+
+  .brand-panel {
+    min-height: auto;
+  }
+
+  .brand-panel h1 {
+    margin-top: 32px;
+  }
+
+  .dashboard {
+    width: calc(100% - 20px);
+    margin: 14px auto 28px;
+  }
+
+  .hero-band,
+  .panel {
+    padding: 16px;
+  }
+
+  .event-list {
+    grid-auto-columns: minmax(235px, 88vw);
+  }
+
+  .event-card {
+    grid-template-columns: 1fr;
+  }
+
+  .event-card button,
+  .actions button,
+  .actions .button {
+    width: 100%;
+  }
+
+  .ticket-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+}
