@@ -31,6 +31,7 @@ const CURRENCIES = {
   USD: { label: "Dolares estadounidenses", rateToMxn: 18 },
   EUR: { label: "Euros", rateToMxn: 20 },
 };
+let cachedServerKeys = null;
 const pool = process.env.DATABASE_URL
   ? new pg.Pool({
       connectionString: process.env.DATABASE_URL,
@@ -50,13 +51,16 @@ function getAesKey() {
 }
 
 function getServerKeys() {
+  if (cachedServerKeys) return cachedServerKeys;
   if (process.env.ECDSA_PUBLIC_KEY_PEM && process.env.ECDSA_PRIVATE_KEY_PEM) {
-    return {
+    cachedServerKeys = {
       publicKey: crypto.createPublicKey(process.env.ECDSA_PUBLIC_KEY_PEM.replace(/\\n/g, "\n")),
       privateKey: crypto.createPrivateKey(process.env.ECDSA_PRIVATE_KEY_PEM.replace(/\\n/g, "\n")),
     };
+    return cachedServerKeys;
   }
-  return crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  cachedServerKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  return cachedServerKeys;
 }
 
 async function ensurePostgres() {
@@ -553,9 +557,23 @@ function makeVisibleCode(ticketId, timestamp = new Date().toISOString()) {
   return sha256(`${ticketId}||${timestamp}`).slice(0, 12).toUpperCase();
 }
 
+function ensureTicketRuntimeFields(ticket) {
+  if (!ticket) return ticket;
+  if (!ticket.publicCode) ticket.publicCode = nanoid(22);
+  if (!ticket.visibleCode) ticket.visibleCode = makeVisibleCode(ticket.id, ticket.publicClaims?.issuedAt || ticket.createdAt);
+  ticket.qrUrl = `${BASE_URL}/ticket/${ticket.publicCode}`;
+  ticket.pdfUrl = `/api/tickets/${ticket.publicCode}/pdf`;
+  return ticket;
+}
+
+function ticketFilename(ticket) {
+  return `${ticket.publicClaims?.ticketCode || ticket.id || ticket.publicCode}.pdf`;
+}
+
 function findTicketByCode(db, code) {
   const value = String(code || "").trim();
-  return db.tickets.find((item) => item.publicCode === value || item.id === value || item.visibleCode === value.toUpperCase());
+  const ticket = db.tickets.find((item) => item.publicCode === value || item.id === value || item.visibleCode === value.toUpperCase());
+  return ensureTicketRuntimeFields(ticket);
 }
 
 function encryptSensitive(db, payload) {
@@ -659,45 +677,14 @@ function randomEvent(organizer) {
   };
 }
 
-async function createTicketPdf(ticket, qrDataUrl) {
-  return `/api/tickets/${ticket.publicCode}/pdf`;
-  const filename = `${ticket.id}.pdf`;
-  const fullPath = path.join(TICKETS_DIR, filename);
-  const qrImage = qrDataUrl.replace(/^data:image\/png;base64,/, "");
-  await new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: "A4", margin: 48 });
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", async () => {
-      try {
-        await fs.writeFile(fullPath, Buffer.concat(chunks));
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
-    doc.rect(0, 0, 595, 842).fill("#ffffff");
-    doc.rect(0, 0, 595, 142).fill("#4C4842");
-    doc.fillColor("#E3CC8C").fontSize(26).text("Pase verificado", 48, 54);
-    doc.fillColor("#ffffff").fontSize(14).text(ticket.publicClaims.organizer, 48, 88);
-    doc.fillColor("#4C4842").fontSize(20).text(ticket.publicClaims.eventName, 48, 172);
-    doc.fillColor("#4C4842").fontSize(12).text(`${ticket.publicClaims.eventDate} - ${ticket.publicClaims.eventTime}`, 48, 204);
-    doc.text(ticket.publicClaims.venue, 48, 224);
-    doc.fillColor("#4C4842").fontSize(14).text(`Costo original: $${ticket.publicClaims.price} MXN`, 48, 250);
-    doc.fillColor("#4C4842").fontSize(14).text(`Codigo visible: ${ticket.visibleCode}`, 48, 270);
-    if (ticket.holderSignature) {
-      doc.fillColor("#82B979").fontSize(14).text(`Ticket firmado: responsabilidad de ${ticket.holderSignature.signerEmail}`, 48, 590);
-    }
-    doc.image(Buffer.from(qrImage, "base64"), 165, 285, { width: 260 });
-    doc.fillColor("#4C4842").fontSize(12).text("Escanea para validar autenticidad sin revelar datos personales.", 92, 575, { align: "center", width: 410 });
-    doc.fillColor("#82B979").fontSize(9).text(`ID publico: ${ticket.publicClaims.ticketCode}`, 48, 730);
-    doc.text(`Firma: ${ticket.crypto.signatureAlg} | Hash: ${ticket.crypto.hashAlg}`, 48, 746);
-    doc.end();
-  });
-  return `/tickets/${filename}`;
+async function createTicketPdf(ticket) {
+  ensureTicketRuntimeFields(ticket);
+  return ticket.pdfUrl;
 }
 
 async function ticketPdfBuffer(ticket, qrDataUrl) {
+  ensureTicketRuntimeFields(ticket);
+  if (!qrDataUrl) qrDataUrl = await QRCode.toDataURL(ticket.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
   const qrImage = qrDataUrl.replace(/^data:image\/png;base64,/, "");
   return new Promise((resolve) => {
     const doc = new PDFDocument({ size: "A4", margin: 48 });
@@ -736,7 +723,7 @@ async function refreshTicketCrypto(db, ticket, owner) {
   ticket.crypto = signTicket(db, ticket.publicClaims, ticket.encryptedHolder);
   ticket.qrUrl = `${BASE_URL}/ticket/${ticket.publicCode}`;
   ticket.qrDataUrl = await QRCode.toDataURL(ticket.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
-  ticket.pdfUrl = await createTicketPdf(ticket, ticket.qrDataUrl);
+  ticket.pdfUrl = await createTicketPdf(ticket);
 }
 
 async function sendAppEmail(to, subject, title, body, actionText, actionUrl) {
@@ -753,9 +740,9 @@ async function sendAppEmail(to, subject, title, body, actionText, actionUrl) {
 
   const smtpUser = process.env.SMTP_USER || process.env.MAIL_USER;
   const smtpPass = process.env.SMTP_PASS || process.env.MAIL_PASS;
-  const smtpHost = process.env.SMTP_HOST || (smtpUser?.includes("gmail.com") ? "smtp.gmail.com" : undefined);
-  const smtpPort = Number(process.env.SMTP_PORT || 587);
-  const smtpSecure = process.env.SMTP_SECURE === "true" || smtpPort === 465;
+  const smtpHost = process.env.SMTP_HOST || process.env.MAIL_HOST || (smtpUser?.includes("gmail.com") ? "smtp.gmail.com" : undefined);
+  const smtpPort = Number(process.env.SMTP_PORT || process.env.MAIL_PORT || 587);
+  const smtpSecure = String(process.env.SMTP_SECURE || process.env.MAIL_SECURE || "").toLowerCase() === "true" || smtpPort === 465;
 
   if (smtpHost && smtpUser && smtpPass) {
     const nodemailer = await import("nodemailer");
@@ -764,14 +751,18 @@ async function sendAppEmail(to, subject, title, body, actionText, actionUrl) {
       port: smtpPort,
       secure: smtpSecure,
       auth: { user: smtpUser, pass: smtpPass },
+      connectionTimeout: 10000,
+      greetingTimeout: 10000,
+      socketTimeout: 15000,
     });
     await transporter.sendMail({
-      from: process.env.MAIL_FROM || `RaizPass <${smtpUser}>`,
+      from: process.env.MAIL_FROM || process.env.SMTP_FROM || `RaizPass <${smtpUser}>`,
       to,
       subject,
       html,
     });
-    return null;
+    console.log(`[Correo enviado] ${subject} -> ${to}`);
+    return { sent: true, previewPath: null };
   }
 
   if (process.env.NODE_ENV !== "production") {
@@ -784,7 +775,7 @@ async function sendAppEmail(to, subject, title, body, actionText, actionUrl) {
 ${actionUrl}
 Vista: ${filePath}
 `);
-    return filePath;
+    return { sent: false, previewPath: filePath };
   }
 
   throw new Error("SMTP no configurado. Define SMTP_USER/SMTP_PASS o MAIL_USER/MAIL_PASS en Railway.");
@@ -823,11 +814,25 @@ app.post("/api/auth/register", async (req, res) => {
   if (!name || String(name).trim().length < 3) return res.status(400).json({ error: "Escribe tu nombre completo." });
   if (!validateEmail(email)) return res.status(400).json({ error: "El correo no tiene un formato valido." });
   if (!password || password.length < 8) return res.status(400).json({ error: "La contrasena debe tener al menos 8 caracteres." });
+
   const db = await loadDb();
-  if (db.users.some((user) => user.email.toLowerCase() === email.toLowerCase())) {
+  const normalizedEmail = String(email).trim().toLowerCase();
+  const existing = db.users.find((user) => user.email.toLowerCase() === normalizedEmail);
+  if (existing) {
+    if (existing.role === "user" && !existing.verified) {
+      existing.verificationToken = nanoid(36);
+      await writeDb(db);
+      try {
+        await sendAppEmail(existing.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${existing.verificationToken}`);
+        return res.json({ ok: true, message: "Ese correo ya estaba registrado sin verificar. Enviamos un nuevo enlace de confirmacion." });
+      } catch (error) {
+        console.error("[SMTP registro existente]", error);
+        return res.status(502).json({ error: `El usuario existe, pero no se pudo enviar el correo: ${error.message}` });
+      }
+    }
     return res.status(409).json({ error: "Ese correo ya esta registrado." });
   }
-  const normalizedEmail = String(email).trim().toLowerCase();
+
   const isDemoOrganization = normalizedEmail.endsWith("@expo.test");
   const token = nanoid(36);
   const userKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
@@ -850,10 +855,14 @@ app.post("/api/auth/register", async (req, res) => {
   if (isDemoOrganization) {
     return res.json({ ok: true, message: "Organizacion demo creada y verificada automaticamente." });
   }
-  const verificationEmailPath = await sendAppEmail(user.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${token}`);
-  user.verificationEmailPath = verificationEmailPath;
-  await writeDb(db);
-  res.json({ ok: true, message: "Cuenta creada. Revisa tu correo para confirmar la cuenta." });
+
+  try {
+    await sendAppEmail(user.email, "Verifica tu correo", "Verifica tu cuenta", "Confirma tu correo para comprar, transferir y validar boletos seguros.", "Verificar correo", `${BASE_URL}/verify-email?token=${token}`);
+    res.json({ ok: true, message: "Cuenta creada. Revisa tu correo para confirmar la cuenta." });
+  } catch (error) {
+    console.error("[SMTP registro]", error);
+    res.status(502).json({ error: `Cuenta creada, pero no se pudo enviar el correo: ${error.message}` });
+  }
 });
 
 app.get("/verify-email", async (req, res) => {
@@ -893,7 +902,12 @@ app.post("/api/auth/forgot", async (req, res) => {
     user.resetToken = nanoid(36);
     user.resetExpires = Date.now() + 1000 * 60 * 30;
     await writeDb(db);
-    await sendAppEmail(user.email, "Restablece tu contrasena", "Restablecimiento seguro", "Recibimos una solicitud para cambiar tu contrasena. El enlace expira en 30 minutos.", "Cambiar contrasena", `${BASE_URL}/reset-password?token=${user.resetToken}`);
+    try {
+      await sendAppEmail(user.email, "Restablece tu contrasena", "Restablecimiento seguro", "Recibimos una solicitud para cambiar tu contrasena. El enlace expira en 30 minutos.", "Cambiar contrasena", `${BASE_URL}/reset-password?token=${user.resetToken}`);
+    } catch (error) {
+      console.error("[SMTP recuperacion]", error);
+      return res.status(502).json({ error: `No se pudo enviar el correo de recuperacion: ${error.message}` });
+    }
   }
   res.json({ ok: true, message: "Si el correo existe, recibirás un enlace de recuperación." });
 });
@@ -1026,7 +1040,7 @@ app.post("/api/tickets", requireAuth, requireUser, async (req, res) => {
   ticket.crypto = signTicket(db, publicClaims, ticket.encryptedHolder);
   ticket.qrUrl = `${BASE_URL}/ticket/${ticket.publicCode}`;
   ticket.qrDataUrl = await QRCode.toDataURL(ticket.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
-  ticket.pdfUrl = await createTicketPdf(ticket, ticket.qrDataUrl);
+  ticket.pdfUrl = await createTicketPdf(ticket);
   db.tickets.push(ticket);
   await writeDb(db);
   res.json({ ticket: summarizeTicket(ticket, db) });
@@ -1065,10 +1079,10 @@ app.get("/api/tickets/:code/pdf", requireAuth, requireUser, async (req, res) => 
   const db = await loadDb();
   const ticket = findTicketByCode(db, req.params.code);
   if (!ticket || ticket.ownerId !== req.session.userId) return res.status(404).send("Boleto no encontrado.");
-  const qrDataUrl = ticket.qrDataUrl || await QRCode.toDataURL(ticket.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
-  const buffer = await ticketPdfBuffer(ticket, qrDataUrl);
+  ensureTicketRuntimeFields(ticket);
+  const buffer = await ticketPdfBuffer(ticket);
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename="${ticket.publicClaims.ticketCode}.pdf"`);
+  res.setHeader("Content-Disposition", `attachment; filename="${ticketFilename(ticket)}"`);
   res.send(buffer);
 });
 
@@ -1246,13 +1260,14 @@ app.post("/api/organization/tickets/:code/tamper-demo", requireAuth, requireOrga
   copy.status = "tampered";
   copy.qrUrl = `${BASE_URL}/ticket/${copy.publicCode}`;
   copy.qrDataUrl = await QRCode.toDataURL(copy.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
-  copy.pdfUrl = await createTicketPdf(copy, copy.qrDataUrl);
+  copy.pdfUrl = await createTicketPdf(copy);
   db.tickets.push(copy);
   await writeDb(db);
   res.json({ ticket: summarizeTicket(copy, db, { verification: verifyTicket(db, copy) }) });
 });
 
 function summarizeTicket(ticket, db, options = {}) {
+  ensureTicketRuntimeFields(ticket);
   const status = effectiveStatus(ticket, db.events);
   const summary = {
     id: ticket.id,
