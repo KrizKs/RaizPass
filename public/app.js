@@ -379,17 +379,25 @@ function renderOrgStats() {
   container.onclick = async (event) => {
     const id = event.target.dataset.deleteEvent;
     if (!id) return;
-    if (!confirm("¿Eliminar este evento de la base de datos?")) return;
-    await api(`/api/events/${id}`, { method: "DELETE" });
-    await loadDashboard();
+    if (!confirm("¿Eliminar este evento? Los boletos emitidos quedarán cancelados en el historial de los usuarios.")) return;
+    try {
+      await api(`/api/events/${id}`, { method: "DELETE" });
+      await loadDashboard();
+    } catch (error) {
+      alert(error.message);
+    }
   };
 }
 
 async function createEvent(event) {
   event.preventDefault();
-  await api("/api/events", { method: "POST", body: JSON.stringify(formData(event.target)) });
-  event.target.reset();
-  await loadDashboard();
+  try {
+    await api("/api/events", { method: "POST", body: JSON.stringify(formData(event.target)) });
+    event.target.reset();
+    await loadDashboard();
+  } catch (error) {
+    alert(error.message);
+  }
 }
 
 async function fillRandomEvent() {
@@ -453,7 +461,10 @@ async function askTransfer(code) {
   const email = prompt("Correo registrado de la persona que recibirá el boleto:");
   if (!email) return;
   try {
-    await api(`/api/tickets/${encodeURIComponent(code)}/transfer`, { method: "POST", body: JSON.stringify({ email }) });
+    const data = await api(`/api/tickets/${encodeURIComponent(code)}/transfer`, { method: "POST", body: JSON.stringify({ email }) });
+    if (data.emailWarning) {
+      alert(`El boleto sí se transfirió, pero no se pudo enviar el correo de aviso: ${data.emailWarning}`);
+    }
     await loadDashboard();
   } catch (error) {
     alert(error.message);
