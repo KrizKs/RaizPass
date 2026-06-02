@@ -141,6 +141,11 @@ async function loadDashboard() {
   state.user = session.user;
   state.events = session.events;
   state.organizations = session.organizations || [];
+  if (!state.user) {
+    $("#appView").style.display = "none";
+    $("#authView").style.display = "grid";
+    return;
+  }
   if (state.user.role === "organization") {
     const stats = await api("/api/organization/stats");
     state.orgStats = stats.stats;
