@@ -1,9 +1,12 @@
 import bcrypt from "bcryptjs";
+import "dotenv/config";
+import connectPgSimple from "connect-pg-simple";
 import crypto from "node:crypto";
 import express from "express";
 import fs from "node:fs/promises";
 import path from "node:path";
 import PDFDocument from "pdfkit";
+import pg from "pg";
 import QRCode from "qrcode";
 import session from "express-session";
 import { fileURLToPath } from "node:url";
@@ -13,7 +16,8 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
-const BASE_URL = process.env.BASE_URL || `https://raizpass-stc2026-2.up.railway.app`;
+const RAILWAY_BASE_URL = "https://raizpass-stc2026-2.up.railway.app";
+const BASE_URL = (process.env.BASE_URL || process.env.PUBLIC_BASE_URL || RAILWAY_BASE_URL).replace(/\/$/, "");
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, "data");
 const STORAGE_DIR = process.env.STORAGE_DIR || path.join(__dirname, "storage");
 const TICKETS_DIR = path.join(STORAGE_DIR, "tickets");
@@ -22,6 +26,17 @@ const DB_PATH = path.join(DATA_DIR, "db.json");
 const TRANSFER_TTL_MS = 24 * 60 * 60 * 1000;
 const DELETE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_TICKETS_PER_USER_EVENT = 5;
+const CURRENCIES = {
+  MXN: { label: "Pesos mexicanos", rateToMxn: 1 },
+  USD: { label: "Dolares estadounidenses", rateToMxn: 18 },
+  EUR: { label: "Euros", rateToMxn: 20 },
+};
+const pool = process.env.DATABASE_URL
+  ? new pg.Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+    })
+  : null;
 const DEMO_PASSWORD = "Admin123!";
 const DEMO_ORGS = [
   { id: "admin", name: "ExpoESCOM", email: "admin@expo.test" },
@@ -29,20 +44,122 @@ const DEMO_ORGS = [
   { id: "org-zenit", name: "Zenit Producciones", email: "zenit@expo.test" },
 ];
 
+function getAesKey() {
+  if (process.env.AES_KEY_BASE64) return Buffer.from(process.env.AES_KEY_BASE64, "base64");
+  return crypto.createHash("sha256").update("raizpass-local-aes-key").digest();
+}
+
+function getServerKeys() {
+  if (process.env.ECDSA_PUBLIC_KEY_PEM && process.env.ECDSA_PRIVATE_KEY_PEM) {
+    return {
+      publicKey: crypto.createPublicKey(process.env.ECDSA_PUBLIC_KEY_PEM.replace(/\\n/g, "\n")),
+      privateKey: crypto.createPrivateKey(process.env.ECDSA_PRIVATE_KEY_PEM.replace(/\\n/g, "\n")),
+    };
+  }
+  return crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+}
+
+async function ensurePostgres() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRIMARY KEY, value JSONB NOT NULL);
+    CREATE TABLE IF NOT EXISTS users (
+      id TEXT PRIMARY KEY,
+      role TEXT NOT NULL,
+      name TEXT NOT NULL,
+      organization_name TEXT,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      verified BOOLEAN NOT NULL DEFAULT FALSE,
+      public_key_pem TEXT,
+      encrypted_private_key JSONB,
+      verification_token TEXT,
+      reset_token TEXT,
+      reset_expires BIGINT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS events (
+      id TEXT PRIMARY KEY,
+      organization_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      date DATE NOT NULL,
+      time TEXT NOT NULL,
+      venue TEXT NOT NULL,
+      organizer TEXT NOT NULL,
+      price NUMERIC(12,2) NOT NULL,
+      currency TEXT NOT NULL DEFAULT 'MXN',
+      price_mxn NUMERIC(12,2) NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE TABLE IF NOT EXISTS tickets (
+      id TEXT PRIMARY KEY,
+      event_id TEXT REFERENCES events(id) ON DELETE SET NULL,
+      organization_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      owner_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      buyer_id TEXT REFERENCES users(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'valid',
+      public_code TEXT UNIQUE NOT NULL,
+      visible_code TEXT UNIQUE NOT NULL,
+      public_claims JSONB NOT NULL,
+      encrypted_holder JSONB NOT NULL,
+      crypto JSONB NOT NULL,
+      purchase_price NUMERIC(12,2),
+      currency TEXT NOT NULL DEFAULT 'MXN',
+      transfer JSONB,
+      transfer_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+      access_log JSONB NOT NULL DEFAULT '[]'::jsonb,
+      holder_signature JSONB,
+      hidden_for JSONB NOT NULL DEFAULT '[]'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      used_at TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS deleted_ticket_counters (
+      event_id TEXT PRIMARY KEY,
+      count INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+}
+
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true }));
+const PgSession = connectPgSimple(session);
 app.use(
   session({
-    secret: process.env.SESSION_SECRET || "expo-escom-dev-secret-change-me",
+    store: pool ? new PgSession({ pool, tableName: "user_sessions", createTableIfMissing: true }) : undefined,
+    secret: process.env.SESSION_SECRET || "change-this-session-secret",
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: "lax", maxAge: 1000 * 60 * 60 * 8 },
+    cookie: {
+      httpOnly: true,
+      sameSite: "lax",
+      secure: process.env.NODE_ENV === "production",
+      maxAge: 1000 * 60 * 60 * 8,
+    },
   }),
 );
 app.use(express.static(path.join(__dirname, "public")));
-app.use("/tickets", express.static(TICKETS_DIR));
 
 async function ensureStorage() {
+  if (pool) {
+    await ensurePostgres();
+    const existing = await readDb();
+    if (!existing.users.length) {
+      const { publicKey, privateKey } = getServerKeys();
+      await writeDb({
+        users: await seedOrganizations(),
+        tickets: [],
+        deletedTicketCounters: {},
+        events: seedEvents(),
+        keys: {
+          aesKey: getAesKey().toString("base64"),
+          publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
+          privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
+        },
+        meta: { createdAt: new Date().toISOString(), seedVersion: 5 },
+      });
+    }
+    return;
+  }
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.mkdir(TICKETS_DIR, { recursive: true });
   await fs.mkdir(EMAIL_DIR, { recursive: true });
@@ -50,19 +167,19 @@ async function ensureStorage() {
     const db = await readDb();
     await writeDb(migrateDb(db));
   } catch {
-    const { publicKey, privateKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const { publicKey, privateKey } = getServerKeys();
     const orgs = await seedOrganizations();
     const db = {
       users: orgs,
       tickets: [],
       deletedTicketCounters: {},
-      events: seedEvents(),
+      events: seedEventsV2(),
       keys: {
-        aesKey: crypto.randomBytes(32).toString("base64"),
+        aesKey: getAesKey().toString("base64"),
         publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
         privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
       },
-      meta: { createdAt: new Date().toISOString() },
+      meta: { createdAt: new Date().toISOString(), seedVersion: 5 },
     };
     await writeDb(db);
   }
@@ -95,14 +212,16 @@ function migrateDb(db) {
     org.verified = true;
   }
   if (db.meta?.seedVersion !== 4) {
-    db.events = seedEvents();
+    db.events = seedEventsV2();
     db.meta ||= {};
     db.meta.seedVersion = 4;
   } else {
     db.events = db.events.map((event) => ({
       ...event,
       organizer: event.organizer || organizationName(db, event.organizationId),
-      price: normalizePrice(event.price),
+      price: normalizePrice(event.price, event.currency).amount,
+      currency: normalizePrice(event.price, event.currency).currency,
+      priceMxn: normalizePrice(event.price, event.currency).mxn,
       createdAt: event.createdAt || new Date().toISOString(),
     }));
   }
@@ -110,10 +229,12 @@ function migrateDb(db) {
     ...ticket,
     eventId: ticket.eventId || db.events.find((event) => event.name === ticket.publicClaims?.eventName)?.id || db.events[0]?.id,
     organizationId: ticket.organizationId || db.events.find((event) => event.id === ticket.eventId)?.organizationId || DEMO_ORGS[0].id,
-    purchasePrice: normalizePrice(ticket.purchasePrice || ticket.publicClaims?.price || db.events.find((event) => event.id === ticket.eventId)?.price),
+    purchasePrice: normalizePrice(ticket.purchasePrice || ticket.publicClaims?.price || db.events.find((event) => event.id === ticket.eventId)?.price, ticket.currency || ticket.publicClaims?.currency).amount,
+    currency: ticket.currency || ticket.publicClaims?.currency || "MXN",
     publicClaims: {
       ...ticket.publicClaims,
-      price: normalizePrice(ticket.publicClaims?.price || ticket.purchasePrice || db.events.find((event) => event.id === ticket.eventId)?.price),
+      price: normalizePrice(ticket.publicClaims?.price || ticket.purchasePrice || db.events.find((event) => event.id === ticket.eventId)?.price, ticket.currency || ticket.publicClaims?.currency).amount,
+      currency: ticket.currency || ticket.publicClaims?.currency || "MXN",
     },
     hiddenFor: ticket.hiddenFor || [],
   }));
@@ -149,7 +270,7 @@ function seedEvents() {
     {
       id: "evt-ia",
       organizationId: "org-lumina",
-      name: "Foro de Innovacion Digital",
+      name: "Foro de Innovación Digital",
       date: "2026-06-12",
       time: "16:30",
       venue: "Centro Cultural Jaime Torres Bodet",
@@ -204,14 +325,33 @@ function seedEvents() {
   ];
 }
 
-function normalizePrice(price) {
+function normalizePrice(price, currency = "MXN") {
+  const selectedCurrency = CURRENCIES[currency] ? currency : "MXN";
   const value = Number(price);
-  if (Number.isFinite(value) && value >= 50 && value <= 300) return Math.round(value);
-  return randomPrice();
+  const amount = Number.isFinite(value) && value > 0 ? Math.round(value) : randomPrice(selectedCurrency);
+  return { amount, currency: selectedCurrency, mxn: Math.round(amount * CURRENCIES[selectedCurrency].rateToMxn) };
 }
 
-function randomPrice() {
+function randomPrice(currency = "MXN", organizationId = "") {
+  if (currency !== "MXN") return Math.floor(Math.random() * 251) + 50;
+  if (organizationId === "org-lumina") return Math.floor(Math.random() * 14001) + 1000;
+  if (organizationId === "org-zenit") return Math.floor(Math.random() * 1601) + 400;
   return Math.floor(Math.random() * 251) + 50;
+}
+
+function seedEventsV2() {
+  const now = () => new Date().toISOString();
+  return [
+    { id: "evt-crypto", organizationId: "admin", name: "Expo Cripto: Acceso Seguro", date: "2026-06-04", time: "11:00", venue: "ESCOM IPN - Auditorio Principal", organizer: "ExpoESCOM", price: 80, currency: "MXN", createdAt: now() },
+    { id: "evt-taller-aes", organizationId: "admin", name: "Taller AES para Boletos Privados", date: "2026-07-03", time: "12:00", venue: "ESCOM IPN - Laboratorio 4", organizer: "ExpoESCOM", price: 65, currency: "MXN", createdAt: now() },
+    { id: "evt-expo-firmas", organizationId: "admin", name: "Laboratorio de Firmas ECDSA", date: "2026-08-14", time: "13:00", venue: "ESCOM IPN - Aula Magna", organizer: "ExpoESCOM", price: 95, currency: "MXN", createdAt: now() },
+    { id: "evt-lumina-synth", organizationId: "org-lumina", name: "Lumina Live: Noche de Synth Pop", date: "2026-06-12", time: "20:30", venue: "Pepsi Center Demo", organizer: "Lumina Eventos", price: 1250, currency: "MXN", createdAt: now() },
+    { id: "evt-lumina-arena", organizationId: "org-lumina", name: "Festival Lumina Arena", date: "2026-07-18", time: "19:00", venue: "Arena Ciudad de Mexico Demo", organizer: "Lumina Eventos", price: 5200, currency: "MXN", createdAt: now() },
+    { id: "evt-lumina-acustico", organizationId: "org-lumina", name: "Lumina Acustico VIP", date: "2026-08-21", time: "21:00", venue: "Teatro Metropolitano Demo", organizer: "Lumina Eventos", price: 14800, currency: "MXN", createdAt: now() },
+    { id: "evt-zenit-cinema", organizationId: "org-zenit", name: "Zenit Cinema: Ciclo de Autor", date: "2026-06-20", time: "18:00", venue: "Cineteca Nacional Demo", organizer: "Zenit Producciones", price: 450, currency: "MXN", createdAt: now() },
+    { id: "evt-zenit-arte", organizationId: "org-zenit", name: "Zenit Arte: Exposicion Inmersiva", date: "2026-08-02", time: "17:30", venue: "Museo Digital Demo", organizer: "Zenit Producciones", price: 980, currency: "MXN", createdAt: now() },
+    { id: "evt-zenit-corto", organizationId: "org-zenit", name: "Festival Zenit de Cortometraje", date: "2026-09-04", time: "18:00", venue: "Foro de Arte Contemporaneo Demo", organizer: "Zenit Producciones", price: 1750, currency: "MXN", createdAt: now() },
+  ];
 }
 
 function organizationName(db, organizationId) {
@@ -220,11 +360,125 @@ function organizationName(db, organizationId) {
 }
 
 async function readDb() {
+  if (pool) return readPostgresDb();
   return JSON.parse(await fs.readFile(DB_PATH, "utf8"));
 }
 
 async function writeDb(db) {
+  if (pool) return writePostgresDb(db);
   await fs.writeFile(DB_PATH, JSON.stringify(db, null, 2), "utf8");
+}
+
+async function readPostgresDb() {
+  const [users, events, tickets, counters, meta] = await Promise.all([
+    pool.query("SELECT * FROM users ORDER BY created_at"),
+    pool.query("SELECT * FROM events WHERE status <> 'deleted' ORDER BY date, time"),
+    pool.query("SELECT * FROM tickets ORDER BY created_at"),
+    pool.query("SELECT * FROM deleted_ticket_counters"),
+    pool.query("SELECT key, value FROM app_meta"),
+  ]);
+  return {
+    users: users.rows.map((row) => ({
+      id: row.id,
+      role: row.role,
+      name: row.name,
+      organizationName: row.organization_name,
+      email: row.email,
+      passwordHash: row.password_hash,
+      verified: row.verified,
+      publicKeyPem: row.public_key_pem,
+      encryptedPrivateKey: row.encrypted_private_key,
+      verificationToken: row.verification_token,
+      resetToken: row.reset_token,
+      resetExpires: row.reset_expires ? Number(row.reset_expires) : undefined,
+      createdAt: row.created_at?.toISOString?.() || row.created_at,
+    })),
+    events: events.rows.map((row) => ({
+      id: row.id,
+      organizationId: row.organization_id,
+      name: row.name,
+      date: row.date instanceof Date ? row.date.toISOString().slice(0, 10) : String(row.date).slice(0, 10),
+      time: row.time,
+      venue: row.venue,
+      organizer: row.organizer,
+      price: Number(row.price),
+      currency: row.currency,
+      priceMxn: Number(row.price_mxn),
+      status: row.status,
+      createdAt: row.created_at?.toISOString?.() || row.created_at,
+    })),
+    tickets: tickets.rows.map((row) => ({
+      id: row.id,
+      eventId: row.event_id,
+      organizationId: row.organization_id,
+      ownerId: row.owner_id,
+      buyerId: row.buyer_id,
+      status: row.status,
+      publicCode: row.public_code,
+      visibleCode: row.visible_code,
+      publicClaims: row.public_claims,
+      encryptedHolder: row.encrypted_holder,
+      crypto: row.crypto,
+      purchasePrice: Number(row.purchase_price),
+      currency: row.currency,
+      transfer: row.transfer,
+      transferHistory: row.transfer_history || [],
+      accessLog: row.access_log || [],
+      holderSignature: row.holder_signature,
+      hiddenFor: row.hidden_for || [],
+      createdAt: row.created_at?.toISOString?.() || row.created_at,
+      usedAt: row.used_at?.toISOString?.() || row.used_at,
+    })),
+    deletedTicketCounters: Object.fromEntries(counters.rows.map((row) => [row.event_id, row.count])),
+    keys: {
+      aesKey: getAesKey().toString("base64"),
+      publicKeyPem: getServerKeys().publicKey.export({ type: "spki", format: "pem" }),
+      privateKeyPem: getServerKeys().privateKey.export({ type: "pkcs8", format: "pem" }),
+    },
+    meta: Object.fromEntries(meta.rows.map((row) => [row.key, row.value])),
+  };
+}
+
+async function writePostgresDb(db) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    for (const user of db.users || []) {
+      await client.query(
+        `INSERT INTO users (id, role, name, organization_name, email, password_hash, verified, public_key_pem, encrypted_private_key, verification_token, reset_token, reset_expires, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+         ON CONFLICT (id) DO UPDATE SET role=$2,name=$3,organization_name=$4,email=$5,password_hash=$6,verified=$7,public_key_pem=$8,encrypted_private_key=$9,verification_token=$10,reset_token=$11,reset_expires=$12`,
+        [user.id, user.role, user.name, user.organizationName, user.email, user.passwordHash, Boolean(user.verified), user.publicKeyPem, JSON.stringify(user.encryptedPrivateKey || null), user.verificationToken, user.resetToken, user.resetExpires || null, user.createdAt || new Date().toISOString()],
+      );
+    }
+    for (const event of db.events || []) {
+      const price = normalizePrice(event.price, event.currency || "MXN");
+      await client.query(
+        `INSERT INTO events (id, organization_id, name, date, time, venue, organizer, price, currency, price_mxn, status, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         ON CONFLICT (id) DO UPDATE SET organization_id=$2,name=$3,date=$4,time=$5,venue=$6,organizer=$7,price=$8,currency=$9,price_mxn=$10,status=$11`,
+        [event.id, event.organizationId, event.name, event.date, event.time, event.venue, event.organizer, price.amount, price.currency, price.mxn, event.status || "active", event.createdAt || new Date().toISOString()],
+      );
+    }
+    for (const ticket of db.tickets || []) {
+      await client.query(
+        `INSERT INTO tickets (id,event_id,organization_id,owner_id,buyer_id,status,public_code,visible_code,public_claims,encrypted_holder,crypto,purchase_price,currency,transfer,transfer_history,access_log,holder_signature,hidden_for,created_at,used_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+         ON CONFLICT (id) DO UPDATE SET event_id=$2,organization_id=$3,owner_id=$4,buyer_id=$5,status=$6,public_code=$7,visible_code=$8,public_claims=$9,encrypted_holder=$10,crypto=$11,purchase_price=$12,currency=$13,transfer=$14,transfer_history=$15,access_log=$16,holder_signature=$17,hidden_for=$18,used_at=$20`,
+        [ticket.id, ticket.eventId, ticket.organizationId, ticket.ownerId, ticket.buyerId, ticket.status, ticket.publicCode, ticket.visibleCode || makeVisibleCode(ticket.id, ticket.createdAt), JSON.stringify(ticket.publicClaims), JSON.stringify(ticket.encryptedHolder), JSON.stringify(ticket.crypto), ticket.purchasePrice || ticket.publicClaims?.price, ticket.currency || ticket.publicClaims?.currency || "MXN", JSON.stringify(ticket.transfer || null), JSON.stringify(ticket.transferHistory || []), JSON.stringify(ticket.accessLog || []), JSON.stringify(ticket.holderSignature || null), JSON.stringify(ticket.hiddenFor || []), ticket.createdAt || new Date().toISOString(), ticket.usedAt || null],
+      );
+    }
+    for (const [eventId, count] of Object.entries(db.deletedTicketCounters || {})) {
+      await client.query("INSERT INTO deleted_ticket_counters (event_id, count) VALUES ($1,$2) ON CONFLICT (event_id) DO UPDATE SET count=$2", [eventId, count]);
+    }
+    await client.query("INSERT INTO app_meta (key,value) VALUES ('state',$1) ON CONFLICT (key) DO UPDATE SET value=$1", [JSON.stringify(db.meta || {})]);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 async function loadDb() {
@@ -264,7 +518,7 @@ function publicUser(user) {
 }
 
 function requireAuth(req, res, next) {
-  if (!req.session.userId) return res.status(401).json({ error: "Inicia sesion para continuar." });
+  if (!req.session.userId) return res.status(401).json({ error: "Inicia sesión para continuar." });
   next();
 }
 
@@ -274,7 +528,7 @@ function requireOrganization(req, res, next) {
 }
 
 function requireUser(req, res, next) {
-  if (req.session.role !== "user") return res.status(403).json({ error: "Esta accion es para usuarios compradores." });
+  if (req.session.role !== "user") return res.status(403).json({ error: "Esta acción es para usuarios compradores." });
   next();
 }
 
@@ -294,6 +548,15 @@ function sha256(value) {
   return crypto.createHash("sha256").update(value).digest("hex");
 }
 
+function makeVisibleCode(ticketId, timestamp = new Date().toISOString()) {
+  return sha256(`${ticketId}||${timestamp}`).slice(0, 12).toUpperCase();
+}
+
+function findTicketByCode(db, code) {
+  const value = String(code || "").trim();
+  return db.tickets.find((item) => item.publicCode === value || item.id === value || item.visibleCode === value.toUpperCase());
+}
+
 function encryptSensitive(db, payload) {
   const key = Buffer.from(db.keys.aesKey, "base64");
   const iv = crypto.randomBytes(12);
@@ -305,6 +568,30 @@ function encryptSensitive(db, payload) {
     tag: cipher.getAuthTag().toString("base64"),
     ciphertext: ciphertext.toString("base64"),
   };
+}
+
+function encryptUserPrivateKey(privateKeyPem, password) {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(password, salt, 32);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(privateKeyPem, "utf8"), cipher.final()]);
+  return {
+    alg: "AES-256-GCM",
+    kdf: "scrypt",
+    salt: salt.toString("base64"),
+    iv: iv.toString("base64"),
+    tag: cipher.getAuthTag().toString("base64"),
+    ciphertext: ciphertext.toString("base64"),
+  };
+}
+
+function decryptUserPrivateKey(encrypted, password) {
+  const salt = Buffer.from(encrypted.salt, "base64");
+  const key = crypto.scryptSync(password, salt, 32);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(encrypted.iv, "base64"));
+  decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
 }
 
 function decryptSensitive(db, encrypted) {
@@ -344,6 +631,7 @@ function verifyTicket(db, ticket) {
 }
 
 function effectiveStatus(ticket, events = []) {
+  if (ticket.status === "cancelled") return "cancelled";
   if (ticket.status === "used" || ticket.status === "tampered") return ticket.status;
   const event = events.find((item) => item.id === ticket.eventId);
   const dateText = event?.date || ticket.publicClaims?.eventDate;
@@ -365,11 +653,13 @@ function randomEvent(organizer) {
     time: `${String(Math.floor(Math.random() * 8 + 10)).padStart(2, "0")}:00`,
     venue: pick(venues),
     organizer,
-    price: randomPrice(),
+    price: randomPrice("MXN"),
+    currency: "MXN",
   };
 }
 
 async function createTicketPdf(ticket, qrDataUrl) {
+  return `/api/tickets/${ticket.publicCode}/pdf`;
   const filename = `${ticket.id}.pdf`;
   const fullPath = path.join(TICKETS_DIR, filename);
   const qrImage = qrDataUrl.replace(/^data:image\/png;base64,/, "");
@@ -393,6 +683,10 @@ async function createTicketPdf(ticket, qrDataUrl) {
     doc.fillColor("#4C4842").fontSize(12).text(`${ticket.publicClaims.eventDate} - ${ticket.publicClaims.eventTime}`, 48, 204);
     doc.text(ticket.publicClaims.venue, 48, 224);
     doc.fillColor("#4C4842").fontSize(14).text(`Costo original: $${ticket.publicClaims.price} MXN`, 48, 250);
+    doc.fillColor("#4C4842").fontSize(14).text(`Codigo visible: ${ticket.visibleCode}`, 48, 270);
+    if (ticket.holderSignature) {
+      doc.fillColor("#82B979").fontSize(14).text(`Ticket firmado: responsabilidad de ${ticket.holderSignature.signerEmail}`, 48, 590);
+    }
     doc.image(Buffer.from(qrImage, "base64"), 165, 285, { width: 260 });
     doc.fillColor("#4C4842").fontSize(12).text("Escanea para validar autenticidad sin revelar datos personales.", 92, 575, { align: "center", width: 410 });
     doc.fillColor("#82B979").fontSize(9).text(`ID publico: ${ticket.publicClaims.ticketCode}`, 48, 730);
@@ -400,6 +694,33 @@ async function createTicketPdf(ticket, qrDataUrl) {
     doc.end();
   });
   return `/tickets/${filename}`;
+}
+
+async function ticketPdfBuffer(ticket, qrDataUrl) {
+  const qrImage = qrDataUrl.replace(/^data:image\/png;base64,/, "");
+  return new Promise((resolve) => {
+    const doc = new PDFDocument({ size: "A4", margin: 48 });
+    const chunks = [];
+    doc.on("data", (chunk) => chunks.push(chunk));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+    doc.rect(0, 0, 595, 842).fill("#ffffff");
+    doc.rect(0, 0, 595, 142).fill("#4C4842");
+    doc.fillColor("#E3CC8C").fontSize(26).text("Pase verificado", 48, 54);
+    doc.fillColor("#ffffff").fontSize(14).text(ticket.publicClaims.organizer, 48, 88);
+    doc.fillColor("#4C4842").fontSize(20).text(ticket.publicClaims.eventName, 48, 172);
+    doc.fillColor("#4C4842").fontSize(12).text(`${ticket.publicClaims.eventDate} - ${ticket.publicClaims.eventTime}`, 48, 204);
+    doc.text(ticket.publicClaims.venue, 48, 224);
+    doc.fontSize(14).text(`Costo original: $${ticket.publicClaims.price} ${ticket.publicClaims.currency || ticket.currency || "MXN"}`, 48, 250);
+    doc.text(`Codigo visible: ${ticket.visibleCode}`, 48, 270);
+    doc.image(Buffer.from(qrImage, "base64"), 165, 305, { width: 240 });
+    doc.fillColor("#4C4842").fontSize(12).text("Escanea para validar autenticidad sin revelar datos personales.", 92, 575, { align: "center", width: 410 });
+    if (ticket.holderSignature) {
+      doc.fillColor("#82B979").fontSize(14).text(`Ticket firmado: responsabilidad de ${ticket.holderSignature.signerEmail}`, 48, 615);
+    }
+    doc.fillColor("#82B979").fontSize(9).text(`ID publico: ${ticket.publicClaims.ticketCode}`, 48, 730);
+    doc.text(`Firma: ${ticket.crypto.signatureAlg} | Hash: ${ticket.crypto.hashAlg}`, 48, 746);
+    doc.end();
+  });
 }
 
 async function refreshTicketCrypto(db, ticket, owner) {
@@ -429,9 +750,30 @@ async function sendPreviewEmail(to, subject, title, body, actionText, actionUrl)
   </table></td></tr></table></body></html>`;
   const safeName = `${Date.now()}-${to.replace(/[^a-z0-9]/gi, "_")}.html`;
   const filePath = path.join(EMAIL_DIR, safeName);
-  await fs.writeFile(filePath, html, "utf8");
-  console.log(`\n[Correo simulado] ${subject} para ${to}\n${actionUrl}\nVista: ${filePath}\n`);
-  return filePath;
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    const nodemailer = await import("nodemailer");
+    const transporter = nodemailer.default.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT || 587),
+      secure: process.env.SMTP_SECURE === "true",
+      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+    });
+    await transporter.sendMail({
+      from: process.env.MAIL_FROM || process.env.SMTP_USER,
+      to,
+      subject,
+      html,
+    });
+    return null;
+  }
+  if (process.env.NODE_ENV !== "production") {
+    await fs.mkdir(EMAIL_DIR, { recursive: true });
+    await fs.writeFile(filePath, html, "utf8");
+    console.log(`\n[Correo desarrollo] ${subject} para ${to}\n${actionUrl}\nVista: ${filePath}\n`);
+    return filePath;
+  }
+  console.log(`[Correo no enviado: configura SMTP] ${subject} para ${to}: ${actionUrl}`);
+  return null;
 }
 
 async function removeIfExists(filePath) {
@@ -474,6 +816,8 @@ app.post("/api/auth/register", async (req, res) => {
   const normalizedEmail = String(email).trim().toLowerCase();
   const isDemoOrganization = normalizedEmail.endsWith("@expo.test");
   const token = nanoid(36);
+  const userKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const privateKeyPem = userKeys.privateKey.export({ type: "pkcs8", format: "pem" });
   const user = {
     id: nanoid(12),
     role: isDemoOrganization ? "organization" : "user",
@@ -481,6 +825,8 @@ app.post("/api/auth/register", async (req, res) => {
     organizationName: isDemoOrganization ? String(name).trim() : undefined,
     email: normalizedEmail,
     passwordHash: await bcrypt.hash(password, 10),
+    publicKeyPem: userKeys.publicKey.export({ type: "spki", format: "pem" }),
+    encryptedPrivateKey: encryptUserPrivateKey(privateKeyPem, password),
     verified: isDemoOrganization,
     verificationToken: isDemoOrganization ? undefined : token,
     createdAt: new Date().toISOString(),
@@ -562,8 +908,9 @@ app.get("/api/events/random", requireAuth, requireOrganization, async (req, res)
 app.post("/api/events", requireAuth, requireOrganization, async (req, res) => {
   const db = await loadDb();
   const org = db.users.find((user) => user.id === req.session.userId);
-  const { name, date, time, venue, organizer } = req.body;
+  const { name, date, time, venue, organizer, price, currency } = req.body;
   if (!name || !date || !time || !venue) return res.status(400).json({ error: "Completa los datos del evento." });
+  const normalizedPrice = normalizePrice(price || randomPrice(currency || "MXN", org.id), currency || "MXN");
   const event = {
     id: nanoid(12),
     organizationId: org.id,
@@ -572,7 +919,9 @@ app.post("/api/events", requireAuth, requireOrganization, async (req, res) => {
     time,
     venue: String(venue).trim(),
     organizer: String(organizer || org.organizationName || org.name).trim(),
-    price: randomPrice(),
+    price: normalizedPrice.amount,
+    currency: normalizedPrice.currency,
+    priceMxn: normalizedPrice.mxn,
     createdAt: new Date().toISOString(),
   };
   db.events.push(event);
@@ -584,6 +933,11 @@ app.delete("/api/events/:id", requireAuth, requireOrganization, async (req, res)
   const db = await loadDb();
   const index = db.events.findIndex((event) => event.id === req.params.id && event.organizationId === req.session.userId);
   if (index === -1) return res.status(404).json({ error: "Evento no encontrado para esta organizacion." });
+  for (const ticket of db.tickets.filter((item) => item.eventId === req.params.id)) {
+    ticket.status = "cancelled";
+    ticket.cancelledAt = new Date().toISOString();
+    ticket.accessLog = [...(ticket.accessLog || []), { by: req.session.userId, at: ticket.cancelledAt, action: "evento_cancelado" }];
+  }
   db.events.splice(index, 1);
   await writeDb(db);
   res.json({ ok: true });
@@ -616,7 +970,7 @@ app.post("/api/tickets", requireAuth, requireUser, async (req, res) => {
     return res.status(400).json({ error: `Solo puedes generar hasta ${MAX_TICKETS_PER_USER_EVENT} boletos por evento.` });
   }
   const ticketCode = `BLC-${nanoid(10).toUpperCase()}`;
-  const price = normalizePrice(event.price);
+  const ticketPrice = normalizePrice(event.price, event.currency || "MXN");
   const publicClaims = {
     ticketCode,
     eventName: event.name,
@@ -624,18 +978,23 @@ app.post("/api/tickets", requireAuth, requireUser, async (req, res) => {
     eventTime: event.time,
     venue: event.venue,
     organizer: event.organizer,
-    price,
+    price: ticketPrice.amount,
+    currency: ticketPrice.currency,
+    priceMxn: ticketPrice.mxn,
     issuedAt: new Date().toISOString(),
   };
+  const ticketId = nanoid(14);
   const ticket = {
-    id: nanoid(14),
+    id: ticketId,
     eventId: event.id,
     organizationId: event.organizationId,
     ownerId: user.id,
     buyerId: user.id,
-    purchasePrice: price,
+    purchasePrice: ticketPrice.amount,
+    currency: ticketPrice.currency,
     status: "valid",
     publicCode: nanoid(22),
+    visibleCode: makeVisibleCode(ticketId, publicClaims.issuedAt),
     publicClaims,
     encryptedHolder: encryptSensitive(db, {
       userId: user.id,
@@ -667,14 +1026,14 @@ app.get("/api/tickets", requireAuth, async (req, res) => {
     .filter((ticket) => ticket.ownerId === req.session.userId && !(ticket.hiddenFor || []).includes(req.session.userId))
     .map((ticket) => summarizeTicket(ticket, db));
   const incomingTransfers = db.tickets
-    .filter((ticket) => ticket.transfer?.status === "pending" && ticket.transfer.toUserId === req.session.userId)
+    .filter((ticket) => ["pending", "gift"].includes(ticket.transfer?.status) && ticket.transfer.toUserId === req.session.userId)
     .map((ticket) => summarizeTicket(ticket, db, { incomingTransfer: true }));
   res.json({ tickets: owned, incomingTransfers });
 });
 
 app.get("/api/tickets/:code", async (req, res) => {
   const db = await loadDb();
-  const ticket = db.tickets.find((item) => item.publicCode === req.params.code || item.id === req.params.code);
+  const ticket = findTicketByCode(db, req.params.code);
   if (!ticket) return res.status(404).json({ error: "Boleto no encontrado." });
   const verification = verifyTicket(db, ticket);
   const payload = summarizeTicket(ticket, db, {
@@ -687,11 +1046,57 @@ app.get("/api/tickets/:code", async (req, res) => {
   res.json({ ticket: payload });
 });
 
+app.get("/api/tickets/:code/pdf", requireAuth, requireUser, async (req, res) => {
+  const db = await loadDb();
+  const ticket = findTicketByCode(db, req.params.code);
+  if (!ticket || ticket.ownerId !== req.session.userId) return res.status(404).send("Boleto no encontrado.");
+  const qrDataUrl = ticket.qrDataUrl || await QRCode.toDataURL(ticket.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
+  const buffer = await ticketPdfBuffer(ticket, qrDataUrl);
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="${ticket.publicClaims.ticketCode}.pdf"`);
+  res.send(buffer);
+});
+
+app.post("/api/tickets/:code/sign", requireAuth, requireUser, async (req, res) => {
+  const db = await loadDb();
+  const user = db.users.find((item) => item.id === req.session.userId);
+  const ticket = findTicketByCode(db, req.params.code);
+  if (!ticket || ticket.ownerId !== user.id) return res.status(404).json({ error: "Boleto no encontrado." });
+  if (effectiveStatus(ticket, db.events) !== "valid") return res.status(400).json({ error: "Solo puedes firmar boletos validos." });
+  if (ticket.holderSignature) return res.status(400).json({ error: "Este boleto ya fue firmado." });
+  if (!req.body.password || !(await bcrypt.compare(req.body.password, user.passwordHash))) {
+    return res.status(401).json({ error: "Contrasena incorrecta para usar tu llave privada." });
+  }
+  const privateKeyPem = decryptUserPrivateKey(user.encryptedPrivateKey, req.body.password);
+  const payload = canonical({
+    ticketId: ticket.id,
+    publicCode: ticket.publicCode,
+    visibleCode: ticket.visibleCode,
+    ownerId: ticket.ownerId,
+    issuedAt: ticket.publicClaims.issuedAt,
+  });
+  const signer = crypto.createSign("SHA256");
+  signer.update(payload);
+  signer.end();
+  ticket.holderSignature = {
+    alg: "ECDSA-P256-SHA256",
+    signerUserId: user.id,
+    signerEmail: user.email,
+    signedAt: new Date().toISOString(),
+    payloadHash: sha256(payload),
+    signature: signer.sign(privateKeyPem, "base64"),
+    publicKeyFingerprint: sha256(user.publicKeyPem || "").slice(0, 24),
+  };
+  ticket.transferHistory = [...(ticket.transferHistory || []), { action: "holder_signed", byUserId: user.id, byEmail: user.email, at: ticket.holderSignature.signedAt }];
+  await writeDb(db);
+  res.json({ ticket: summarizeTicket(ticket, db) });
+});
+
 app.get("/ticket/:code", (req, res) => res.sendFile(path.join(__dirname, "public", "ticket.html")));
 
 app.post("/api/tickets/:code/delete", requireAuth, requireUser, async (req, res) => {
   const db = await loadDb();
-  const index = db.tickets.findIndex((item) => (item.publicCode === req.params.code || item.id === req.params.code) && item.ownerId === req.session.userId);
+  const index = db.tickets.findIndex((item) => (item.publicCode === req.params.code || item.id === req.params.code || item.visibleCode === req.params.code.toUpperCase()) && item.ownerId === req.session.userId);
   const ticket = db.tickets[index];
   if (!ticket) return res.status(404).json({ error: "Boleto no encontrado." });
   db.deletedTicketCounters ||= {};
@@ -711,6 +1116,31 @@ app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, re
   const recipient = db.users.find((user) => user.role === "user" && user.verified && user.email.toLowerCase() === req.body.email.toLowerCase());
   if (!recipient) return res.status(404).json({ error: "El destinatario debe tener una cuenta de usuario verificada." });
   if (recipient.id === req.session.userId) return res.status(400).json({ error: "No puedes transferirte el mismo boleto." });
+  if (ticket.holderSignature) {
+    ticket.transferHistory = [...(ticket.transferHistory || []), {
+      id: nanoid(12),
+      fromUserId: req.session.userId,
+      fromEmail: db.users.find((user) => user.id === req.session.userId)?.email,
+      toUserId: recipient.id,
+      toEmail: recipient.email,
+      status: "gift",
+      createdAt: Date.now(),
+      acceptedAt: new Date().toISOString(),
+      note: "Transferencia inmediata de boleto firmado; QR y datos cifrados originales permanecen sin cambios.",
+    }];
+    ticket.ownerId = recipient.id;
+    ticket.transfer = {
+      id: nanoid(12),
+      fromUserId: req.session.userId,
+      toUserId: recipient.id,
+      toEmail: recipient.email,
+      status: "gift",
+      createdAt: Date.now(),
+    };
+    await writeDb(db);
+    await sendPreviewEmail(recipient.email, "Recibiste un boleto firmado", "Boleto firmado recibido", `Recibiste un boleto firmado para ${ticket.publicClaims.eventName}. El QR conserva la responsabilidad criptografica del firmante original.`, "Ver mis boletos", BASE_URL);
+    return res.json({ ticket: summarizeTicket(ticket, db) });
+  }
   ticket.transfer = {
     id: nanoid(12),
     fromUserId: req.session.userId,
@@ -729,6 +1159,12 @@ app.post("/api/tickets/:code/transfer", requireAuth, requireUser, async (req, re
 app.post("/api/transfers/:ticketId/accept", requireAuth, requireUser, async (req, res) => {
   const db = await loadDb();
   const ticket = db.tickets.find((item) => item.id === req.params.ticketId && item.transfer?.status === "pending" && item.transfer.toUserId === req.session.userId);
+  const giftTicket = db.tickets.find((item) => item.id === req.params.ticketId && item.transfer?.status === "gift" && item.transfer.toUserId === req.session.userId);
+  if (giftTicket) {
+    delete giftTicket.transfer;
+    await writeDb(db);
+    return res.json({ ticket: summarizeTicket(giftTicket, db) });
+  }
   if (!ticket) return res.status(404).json({ error: "Transferencia no encontrada." });
   if (ticket.transfer.expiresAt < Date.now()) {
     delete ticket.transfer;
@@ -755,7 +1191,7 @@ app.post("/api/transfers/:ticketId/reject", requireAuth, requireUser, async (req
 
 app.post("/api/organization/tickets/:code/admit", requireAuth, requireOrganization, async (req, res) => {
   const db = await loadDb();
-  const ticket = db.tickets.find((item) => item.publicCode === req.params.code || item.id === req.params.code);
+  const ticket = findTicketByCode(db, req.params.code);
   if (!ticket) return res.status(404).json({ error: "Boleto no encontrado." });
   if (ticket.organizationId !== req.session.userId) return res.status(403).json({ error: "Este boleto pertenece a otra organizacion." });
   const verification = verifyTicket(db, ticket);
@@ -765,7 +1201,22 @@ app.post("/api/organization/tickets/:code/admit", requireAuth, requireOrganizati
   ticket.usedAt = new Date().toISOString();
   ticket.accessLog.push({ by: req.session.userId, at: ticket.usedAt, action: "admitido" });
   await writeDb(db);
-  res.json({ ticket: { ...summarizeTicket(ticket, db, { verification, includeTrace: true }), holder: decryptSensitive(db, ticket.encryptedHolder) } });
+  const payload = summarizeTicket(ticket, db, { verification });
+  if (!ticket.holderSignature) payload.holder = decryptSensitive(db, ticket.encryptedHolder);
+  payload.accessMode = ticket.holderSignature ? "signed_fast_access" : "identity_check";
+  res.json({ ticket: payload });
+});
+
+app.get("/api/organization/access/:code", requireAuth, requireOrganization, async (req, res) => {
+  const db = await loadDb();
+  const ticket = findTicketByCode(db, req.params.code);
+  if (!ticket) return res.status(404).json({ error: "Boleto no encontrado." });
+  if (ticket.organizationId !== req.session.userId) return res.status(403).json({ error: "Este boleto pertenece a otra organizacion." });
+  const verification = verifyTicket(db, ticket);
+  const payload = summarizeTicket(ticket, db, { verification });
+  payload.accessMode = ticket.holderSignature ? "signed_fast_access" : "identity_check";
+  if (!ticket.holderSignature) payload.holder = decryptSensitive(db, ticket.encryptedHolder);
+  res.json({ ticket: payload });
 });
 
 app.post("/api/organization/tickets/:code/tamper-demo", requireAuth, requireOrganization, async (req, res) => {
@@ -794,6 +1245,7 @@ function summarizeTicket(ticket, db, options = {}) {
     organizationId: ticket.organizationId,
     status: options.incomingTransfer ? "transfer_pending" : status,
     publicCode: ticket.publicCode,
+    visibleCode: ticket.visibleCode,
     publicClaims: ticket.publicClaims,
     qrUrl: ticket.qrUrl,
     qrDataUrl: ticket.qrDataUrl,
@@ -805,6 +1257,7 @@ function summarizeTicket(ticket, db, options = {}) {
     incomingTransfer: Boolean(options.incomingTransfer),
     accessLog: ticket.accessLog || [],
     purchasePrice: ticket.purchasePrice || ticket.publicClaims.price,
+    holderSignature: ticket.holderSignature || null,
   };
   if (options.includeTrace) summary.traceability = buildTraceability(ticket, db);
   return summary;
@@ -824,6 +1277,15 @@ function buildTraceability(ticket, db) {
     },
   ];
   for (const transfer of ticket.transferHistory || []) {
+    if (transfer.action === "holder_signed") {
+      trace.push({
+        type: "holder_signed",
+        label: "Boleto firmado por titular",
+        at: transfer.at,
+        detail: `Firmante responsable: ${userName(transfer.byUserId, transfer.byEmail)}`,
+      });
+      continue;
+    }
     trace.push({
       type: "transfer_requested",
       label: "Transferencia solicitada",
@@ -833,7 +1295,7 @@ function buildTraceability(ticket, db) {
     if (transfer.acceptedAt) {
       trace.push({
         type: "transfer_accepted",
-        label: "Transferencia aceptada",
+        label: transfer.status === "gift" ? "Boleto firmado transferido" : "Transferencia aceptada",
         at: transfer.acceptedAt,
         detail: `Nuevo titular: ${userName(transfer.toUserId, transfer.toEmail)}`,
       });

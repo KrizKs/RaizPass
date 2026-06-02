@@ -10,13 +10,16 @@
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
+    "connect-pg-simple": "^10.0.0",
     "cookie-parser": "^1.4.6",
+    "dotenv": "^17.4.2",
     "express": "^4.19.2",
     "express-session": "^1.18.0",
     "lowdb": "^7.0.1",
     "nanoid": "^5.0.7",
     "nodemailer": "^6.9.13",
     "pdfkit": "^0.15.0",
+    "pg": "^8.21.0",
     "qrcode": "^1.5.3"
   }
 }

@@ -106,6 +106,17 @@ async function init() {
     }
   });
 
+  $("#lookupForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const code = formData(event.target).code.trim();
+      const data = await api(`/api/tickets/${encodeURIComponent(code)}`);
+      location.href = `/ticket/${data.ticket.publicCode}`;
+    } catch {
+      setNotice("Codigo incorrecto o no existe.", true);
+    }
+  });
+
   $("#logoutBtn").addEventListener("click", async () => {
     await api("/api/auth/logout", { method: "POST" });
     state.user = null;
