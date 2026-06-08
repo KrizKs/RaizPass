@@ -18,8 +18,11 @@
       function statusText(status) {
         return { valid: "Válido", used: "Usado", expired: "Expirado", tampered: "Alterado", transfer_pending: "Transferencia pendiente" }[status] || status;
       }
-      function formatPrice(value) {
-        return `$${Number(value || 0).toFixed(0)} MXN`;
+      function formatPrice(value, currency = "MXN") {
+        return Number(value || 0).toLocaleString("es-MX", { style: "currency", currency, maximumFractionDigits: 0 });
+      }
+      function seatText(seat) {
+        return seat ? `${seat.zone} · Sección ${seat.section} · Lugar ${seat.seatNumber}` : "Sin lugar asignado";
       }
       fetch(`/api/tickets/${encodeURIComponent(code)}`)
         .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
@@ -31,7 +34,9 @@
             <h1>${ticket.publicClaims.eventName}</h1>
             <p>${ticket.publicClaims.eventDate} ${ticket.publicClaims.eventTime} · ${ticket.publicClaims.venue}</p>
             <p><strong>Organización:</strong> ${ticket.publicClaims.organizer}</p>
-            <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice)}</p>
+            <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice, ticket.publicClaims.currency || ticket.currency || "MXN")}</p>
+            <p><strong>Lugar:</strong> ${seatText(ticket.seat || ticket.publicClaims.seat)}</p>
+            <p><strong>Código visible:</strong> ${ticket.visibleCode}</p>
             <div class="status-line">
               <span class="pill ${ticket.status}">${statusText(ticket.status)}</span>
               <span class="pill ${verification.authentic ? "valid" : "tampered"}">${verification.authentic ? "Firma auténtica" : "Firma invalida"}</span>

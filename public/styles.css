@@ -577,3 +577,89 @@ svg {
     align-items: flex-start;
   }
 }
+
+/* Modales y notificaciones internas */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(31, 36, 31, 0.58);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  z-index: 50;
+}
+
+.modal-card {
+  width: min(720px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.24);
+  padding: 22px;
+}
+
+.modal-card h3 {
+  margin: 0 0 10px;
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 18px;
+}
+
+.seat-map {
+  width: 100%;
+  max-height: 430px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #fff;
+  margin: 10px 0 16px;
+}
+
+.toast {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  max-width: min(420px, calc(100vw - 36px));
+  background: var(--earth);
+  color: var(--paper);
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  border-radius: 10px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.22);
+  padding: 14px 16px;
+  font-weight: 800;
+  transform: translateY(18px);
+  opacity: 0;
+  pointer-events: none;
+  transition: 180ms ease;
+  z-index: 60;
+}
+
+.toast.visible {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.toast.error {
+  background: var(--bad);
+}
+
+@media (max-width: 640px) {
+  .modal-card {
+    padding: 16px;
+  }
+
+  .modal-actions button {
+    width: 100%;
+  }
+
+  .seat-map {
+    max-height: 310px;
+  }
+}

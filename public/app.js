@@ -9,6 +9,8 @@ const state = {
   organizationFilter: "",
 };
 
+const ZONE_ORDER = ["Zona Roja", "Zona Azul", "Zona Verde", "Zona Blanca", "Zona Lila", "Zona Naranja", "Zona Amarilla"];
+
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 
@@ -17,6 +19,78 @@ function setNotice(text, isError = false) {
   if (!notice) return;
   notice.textContent = text || "";
   notice.style.color = isError ? "var(--bad)" : "var(--earth)";
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
+}
+
+function showToast(message, isError = false) {
+  let toast = $("#toast");
+  if (!toast) {
+    toast = document.createElement("div");
+    toast.id = "toast";
+    document.body.appendChild(toast);
+  }
+  toast.className = `toast ${isError ? "error" : ""}`;
+  toast.textContent = message;
+  requestAnimationFrame(() => toast.classList.add("visible"));
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => toast.classList.remove("visible"), 3800);
+}
+
+function closeModal(value = null) {
+  const overlay = $(".modal-overlay");
+  if (overlay) overlay.remove();
+  if (typeof closeModal.resolve === "function") closeModal.resolve(value);
+  closeModal.resolve = null;
+}
+
+function openModal(html) {
+  closeModal(null);
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `<div class="modal-card">${html}</div>`;
+  document.body.appendChild(overlay);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeModal(null);
+  });
+  return new Promise((resolve) => {
+    closeModal.resolve = resolve;
+  });
+}
+
+async function confirmModal(title, message, action = "Aceptar", danger = false) {
+  const promise = openModal(`
+    <h3>${escapeHtml(title)}</h3>
+    <p class="muted">${escapeHtml(message)}</p>
+    <div class="modal-actions">
+      <button class="ghost" data-modal-cancel>Cancelar</button>
+      <button class="${danger ? "danger" : ""}" data-modal-confirm>${escapeHtml(action)}</button>
+    </div>`);
+  $("[data-modal-cancel]").onclick = () => closeModal(false);
+  $("[data-modal-confirm]").onclick = () => closeModal(true);
+  return Boolean(await promise);
+}
+
+async function promptModal(title, message, inputLabel, options = {}) {
+  const type = options.type || "text";
+  const promise = openModal(`
+    <h3>${escapeHtml(title)}</h3>
+    <p class="muted">${escapeHtml(message)}</p>
+    <label><span>${escapeHtml(inputLabel)}</span><input id="modalInput" type="${type}" value="${escapeHtml(options.value || "")}" placeholder="${escapeHtml(options.placeholder || "")}"></label>
+    <div class="modal-actions">
+      <button class="ghost" data-modal-cancel>Cancelar</button>
+      <button data-modal-confirm>${escapeHtml(options.action || "Continuar")}</button>
+    </div>`);
+  $("[data-modal-cancel]").onclick = () => closeModal(null);
+  $("[data-modal-confirm]").onclick = () => closeModal($("#modalInput").value.trim());
+  $("#modalInput").focus();
+  return await promise;
+}
+
+function seatText(seat) {
+  return seat ? `${seat.zone} · Sección ${seat.section} · Lugar ${seat.seatNumber}` : "Sin lugar asignado";
 }
 
 function ticketPdfUrl(ticket) {
@@ -225,6 +299,48 @@ function ticketsOwnedForEvent(eventId) {
   return state.tickets.filter((ticket) => ticket.eventId === eventId).length;
 }
 
+async function openPurchaseModal(eventItem) {
+  const availability = await api(`/api/events/${encodeURIComponent(eventItem.id)}/availability`);
+  const zoneOptions = availability.zones.map((zone) => `<option value="${escapeHtml(zone.zone)}" ${zone.full ? "disabled" : ""}>${escapeHtml(zone.zone)}${zone.full ? " - agotada" : ""}</option>`).join("");
+  const promise = openModal(`
+    <h3>Selecciona tu lugar</h3>
+    <p><strong>${escapeHtml(eventItem.name)}</strong></p>
+    <p class="muted">Costo: ${formatPrice(eventItem.price, eventItem.currency || "MXN")}. El lugar se asigna automáticamente entre 1 y 500 dentro de la sección elegida.</p>
+    <img class="seat-map" src="/mapa.png" alt="Mapa de zonas del evento">
+    <div class="form">
+      <label><span>Zona</span><select id="zoneSelect"><option value="">Selecciona zona</option>${zoneOptions}</select></label>
+      <label><span>Sección</span><select id="sectionSelect" disabled><option value="">Selecciona sección</option></select></label>
+      <label><span>Contraseña</span><input id="purchasePassword" type="password" placeholder="Firma ECDSA del boleto" autocomplete="current-password"></label>
+    </div>
+    <div class="modal-actions">
+      <button class="ghost" data-modal-cancel>Cancelar</button>
+      <button data-modal-confirm disabled>Confirmar compra</button>
+    </div>`);
+  const zoneSelect = $("#zoneSelect");
+  const sectionSelect = $("#sectionSelect");
+  const passwordInput = $("#purchasePassword");
+  const confirmButton = $("[data-modal-confirm]");
+  function updateSections() {
+    const zone = availability.zones.find((item) => item.zone === zoneSelect.value);
+    sectionSelect.disabled = !zone;
+    sectionSelect.innerHTML = `<option value="">Selecciona sección</option>${zone ? zone.sections.map((section) => `<option value="${escapeHtml(section.section)}" ${section.full ? "disabled" : ""}>${escapeHtml(section.section)} · ${section.remaining}/${section.capacity} disponibles${section.full ? " - agotada" : ""}</option>`).join("") : ""}`;
+    updateConfirm();
+  }
+  function updateConfirm() {
+    confirmButton.disabled = !zoneSelect.value || !sectionSelect.value || !passwordInput.value.trim();
+  }
+  zoneSelect.onchange = updateSections;
+  sectionSelect.onchange = updateConfirm;
+  passwordInput.oninput = updateConfirm;
+  $("[data-modal-cancel]").onclick = () => closeModal(null);
+  confirmButton.onclick = () => {
+    if (!zoneSelect.value || !sectionSelect.value) return showToast("Selecciona zona y sección.", true);
+    if (!passwordInput.value.trim()) return showToast("Confirma tu contraseña para firmar el boleto.", true);
+    closeModal({ zone: zoneSelect.value, section: sectionSelect.value, password: passwordInput.value });
+  };
+  return await promise;
+}
+
 function renderEventList() {
   const container = $("#eventList");
   const query = state.eventSearch.trim().toLowerCase();
@@ -256,9 +372,15 @@ function renderEventList() {
     if (!id) return;
     const selected = state.events.find((item) => item.id === id);
     if (ticketsOwnedForEvent(id) >= 5) return;
-    if (!confirm(`¿Comprar boleto para ${selected.name} con costo de ${formatPrice(selected.price, selected.currency || "MXN")}?`)) return;
-    await api("/api/tickets", { method: "POST", body: JSON.stringify({ eventId: id }) });
-    await loadDashboard();
+    try {
+      const purchase = await openPurchaseModal(selected);
+      if (!purchase) return;
+      await api("/api/tickets", { method: "POST", body: JSON.stringify({ eventId: id, ...purchase }) });
+      showToast("Boleto comprado y firmado con tu llave ECDSA.");
+      await loadDashboard();
+    } catch (error) {
+      showToast(error.message, true);
+    }
   };
 }
 
@@ -276,6 +398,7 @@ function renderIncomingTransfers() {
       </div>
       <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice, ticket.publicClaims.currency || ticket.currency || "MXN")}</p>
       <p><strong>Código visible:</strong> ${ticket.visibleCode}</p>
+      <p><strong>Lugar:</strong> ${seatText(ticket.seat || ticket.publicClaims?.seat)}</p>
       ${ticket.transfer?.expiresAt ? `<p class="muted">Expira: ${new Date(ticket.transfer.expiresAt).toLocaleString()}</p>` : `<p class="muted">Boleto firmado recibido. Sólo necesitas aceptarlo para verlo en tu historial.</p>`}
       <div class="actions">
         <button data-accept="${ticket.id}">Aceptar</button>
@@ -284,11 +407,18 @@ function renderIncomingTransfers() {
     </article>`).join("");
   container.onclick = async (event) => {
     if (event.target.dataset.accept) {
-      await api(`/api/transfers/${event.target.dataset.accept}/accept`, { method: "POST" });
-      await loadDashboard();
+      const password = await promptModal("Aceptar transferencia", "Para recibir el boleto, se actualizará el titular y se firmará con tu llave privada ECDSA.", "Contraseña", { type: "password", action: "Aceptar boleto" });
+      if (!password) return;
+      try {
+        await api(`/api/transfers/${event.target.dataset.accept}/accept`, { method: "POST", body: JSON.stringify({ password }) });
+        showToast("Boleto aceptado y firmado.");
+        await loadDashboard();
+      } catch (error) { showToast(error.message, true); }
     }
     if (event.target.dataset.reject) {
+      if (!await confirmModal("Rechazar transferencia", "El boleto regresará a estar disponible para quien lo envió.", "Rechazar", true)) return;
       await api(`/api/transfers/${event.target.dataset.reject}/reject`, { method: "POST" });
+      showToast("Transferencia rechazada.");
       await loadDashboard();
     }
   };
@@ -379,12 +509,13 @@ function renderOrgStats() {
   container.onclick = async (event) => {
     const id = event.target.dataset.deleteEvent;
     if (!id) return;
-    if (!confirm("¿Eliminar este evento? Los boletos emitidos quedarán cancelados en el historial de los usuarios.")) return;
+    if (!await confirmModal("Eliminar evento", "Los boletos emitidos quedarán cancelados en el historial de los usuarios.", "Eliminar evento", true)) return;
     try {
       await api(`/api/events/${id}`, { method: "DELETE" });
+      showToast("Evento eliminado y boletos cancelados.");
       await loadDashboard();
     } catch (error) {
-      alert(error.message);
+      showToast(error.message, true);
     }
   };
 }
@@ -396,18 +527,8 @@ async function createEvent(event) {
     event.target.reset();
     await loadDashboard();
   } catch (error) {
-    alert(error.message);
+    showToast(error.message, true);
   }
-}
-
-async function fillRandomEvent() {
-  const event = await api("/api/events/random");
-  const form = $("#eventForm");
-  form.name.value = event.name;
-  form.date.value = event.date;
-  form.time.value = event.time;
-  form.venue.value = event.venue;
-  form.organizer.value = event.organizer;
 }
 
 function renderTicketList(container, tickets, organization) {
@@ -425,14 +546,16 @@ function renderTicketList(container, tickets, organization) {
     status.textContent = statusText(ticket.status);
     status.classList.add(ticket.status);
     const actions = $("[data-field=actions]", node);
+    const pending = Boolean(ticket.transfer && ticket.transfer.status === "pending");
     actions.innerHTML = `
       <span class="pill">${formatPrice(ticket.publicClaims.price || ticket.purchasePrice, ticket.publicClaims.currency || ticket.currency || "MXN")}</span>
       <span class="pill">Código visible: ${ticket.visibleCode || "No generado"}</span>
+      ${ticket.seat ? `<span class="pill">${seatText(ticket.seat)}</span>` : ""}
       <a class="button secondary" href="${ticketPdfUrl(ticket)}" target="_blank" rel="noopener">PDF</a>
-      ${!ticket.holderSignature ? `<button data-sign="${ticket.publicCode}" ${ticket.status !== "valid" ? "disabled" : ""}>Firmar con mi llave privada</button>` : `<span class="pill valid">Firmado por ${ticket.holderSignature.signerEmail}</span>`}
-      <button data-transfer="${ticket.publicCode}" ${ticket.status !== "valid" ? "disabled" : ""}>Transferir</button>
-      <button class="secondary" data-delete="${ticket.publicCode}">Eliminar boleto</button>
-      ${ticket.transfer ? `<span class="pill transfer_pending">Enviado a ${ticket.transfer.toEmail}</span>` : ""}
+      ${ticket.holderSignature ? `<span class="pill valid">Firmado ECDSA: ${ticket.holderSignature.signerEmail}</span>` : ""}
+      <button data-transfer="${ticket.publicCode}" ${ticket.status !== "valid" || pending ? "disabled" : ""}>Transferir</button>
+      <button class="secondary" data-delete="${ticket.publicCode}" ${pending ? "disabled" : ""}>Eliminar boleto</button>
+      ${pending ? `<span class="pill transfer_pending">Transferencia pendiente para ${ticket.transfer.toEmail}</span>` : ""}
       ${organization ? `<button data-check="${ticket.publicCode}">Verificar</button><button class="danger" data-admit="${ticket.publicCode}">Permitir acceso</button>` : ""}
     `;
     actions.addEventListener("click", handleTicketAction);
@@ -446,40 +569,32 @@ async function handleTicketAction(event) {
     await navigator.clipboard.writeText(target.dataset.copy);
     target.textContent = "Copiado";
   }
-  if (target.dataset.sign) await signTicket(target.dataset.sign);
   if (target.dataset.transfer) await askTransfer(target.dataset.transfer);
   if (target.dataset.delete) {
-    if (!confirm("¿Eliminar este boleto de tu historial? El PDF se genera dinámicamente, no se conserva almacenamiento permanente.")) return;
-    await api(`/api/tickets/${target.dataset.delete}/delete`, { method: "POST" });
-    await loadDashboard();
+    if (!await confirmModal("Eliminar boleto", "El boleto dejará de aparecer en tu historial. El PDF se genera dinámicamente y no se conserva almacenamiento permanente.", "Eliminar boleto", true)) return;
+    try {
+      await api(`/api/tickets/${target.dataset.delete}/delete`, { method: "POST" });
+      showToast("Boleto eliminado del historial.");
+      await loadDashboard();
+    } catch (error) { showToast(error.message, true); }
   }
   if (target.dataset.check) await showTicket(target.dataset.check, "#orgResult");
   if (target.dataset.admit) await admitTicket(target.dataset.admit, "#orgResult");
 }
 
 async function askTransfer(code) {
-  const email = prompt("Correo registrado de la persona que recibirá el boleto:");
+  const email = await promptModal("Transferir boleto", "Escribe el correo registrado de la persona que recibirá el boleto. Mientras esté pendiente, sólo podrás descargar el PDF.", "Correo destino", { type: "email", action: "Enviar transferencia" });
   if (!email) return;
   try {
     const data = await api(`/api/tickets/${encodeURIComponent(code)}/transfer`, { method: "POST", body: JSON.stringify({ email }) });
     if (data.emailWarning) {
-      alert(`El boleto sí se transfirió, pero no se pudo enviar el correo de aviso: ${data.emailWarning}`);
+      showToast(`El boleto sí quedó en transferencia, pero no se envió correo: ${data.emailWarning}`, true);
+    } else {
+      showToast("Transferencia enviada.");
     }
     await loadDashboard();
   } catch (error) {
-    alert(error.message);
-  }
-}
-
-async function signTicket(code) {
-  if (!confirm("¿Firmar este boleto con tu llave privada? Al hacerlo, quedará ligado a tu identidad criptográfica y el QR no cambiará aunque lo transfieras.")) return;
-  const password = prompt("Confirma tu contraseña para desbloquear tu llave privada:");
-  if (!password) return;
-  try {
-    await api(`/api/tickets/${encodeURIComponent(code)}/sign`, { method: "POST", body: JSON.stringify({ password }) });
-    await loadDashboard();
-  } catch (error) {
-    alert(error.message);
+    showToast(error.message, true);
   }
 }
 
@@ -527,6 +642,7 @@ function ticketDetails(ticket, organization = false, options = {}) {
       <p><strong>Organización:</strong> ${ticket.publicClaims.organizer}</p>
       <p><strong>Costo original:</strong> ${formatPrice(ticket.publicClaims.price || ticket.purchasePrice, ticket.publicClaims.currency || ticket.currency || "MXN")}</p>
       <p><strong>Código visible:</strong> ${ticket.visibleCode}</p>
+      <p><strong>Lugar:</strong> ${seatText(ticket.seat || ticket.publicClaims?.seat)}</p>
       <div class="status-line">
         <span class="pill ${verification.authentic ? "valid" : "tampered"}">${verification.authentic ? "Firma auténtica" : "Firma inválida"}</span>
         <span class="pill ${verification.hashMatches ? "valid" : "tampered"}">${verification.hashMatches ? "Hash coincide" : "Hash alterado"}</span>
