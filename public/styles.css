@@ -55,14 +55,23 @@ a {
 }
 
 .logo {
-  width: 42px;
-  height: 42px;
-  border-radius: 8px;
+  width: 92px;
+  height: 58px;
+  border-radius: 12px;
   display: grid;
   place-items: center;
-  background: var(--gold);
-  color: var(--earth);
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  background: #fffaf0;
+  border: 1px solid rgba(76, 72, 66, 0.18);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
+  padding: 4px;
+  overflow: hidden;
+}
+
+.logo img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
 }
 
 .brand-panel h1 {
@@ -748,4 +757,35 @@ svg {
 
 .stats-carousel {
   max-height: calc((170px * 4) + (12px * 3));
+}
+
+
+/* Fix8: logo oficial y barra superior no fija. */
+.app {
+  padding-top: 0;
+}
+
+.topbar {
+  position: static;
+  top: auto;
+  left: auto;
+  right: auto;
+  z-index: auto;
+}
+
+@media (max-width: 880px) {
+  .app {
+    padding-top: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .app {
+    padding-top: 0;
+  }
+
+  .logo {
+    width: 78px;
+    height: 50px;
+  }
 }
