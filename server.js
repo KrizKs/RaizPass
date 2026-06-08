@@ -817,6 +817,13 @@ async function ticketPdfBuffer(ticket, qrDataUrl) {
     doc.on("end", () => resolve(Buffer.concat(chunks)));
     doc.rect(0, 0, 595, 842).fill("#ffffff");
     doc.rect(0, 0, 595, 142).fill("#4C4842");
+    const logoPath = path.join(__dirname, "public", "LogoEVRaizPass.png");
+    try {
+      doc.roundedRect(430, 22, 118, 70, 10).fill("#fffaf0");
+      doc.image(logoPath, 438, 29, { fit: [102, 56], align: "center", valign: "center" });
+    } catch (error) {
+      doc.fillColor("#E3CC8C").fontSize(10).text("RaizPass", 458, 48);
+    }
     doc.fillColor("#E3CC8C").fontSize(26).text("Pase verificado", 48, 54);
     doc.fillColor("#ffffff").fontSize(14).text(ticket.publicClaims.organizer, 48, 88);
     doc.fillColor("#4C4842").fontSize(20).text(ticket.publicClaims.eventName, 48, 172);
