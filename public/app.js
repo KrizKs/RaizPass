@@ -470,6 +470,12 @@ function renderOrganization() {
           <label><span>Código visible, token o QR</span><input name="code" placeholder="Código visible o token de acceso"></label>
           <button type="submit">Consultar expediente del boleto</button>
         </form>
+        <div class="actions" style="margin-top:12px">
+          <button id="startInfoScan" class="secondary">Activar cámara para expediente</button>
+          <button id="stopInfoScan" class="ghost">Detener</button>
+        </div>
+        <video id="infoVideo" playsinline></video>
+        <p id="infoScanNotice" class="muted">También puedes escanear el QR para consultar el expediente completo del boleto.</p>
         <div id="orgInfoResult"></div>
       </section>
     </div>`;
@@ -484,8 +490,10 @@ function renderOrganization() {
   $("#eventForm").addEventListener("submit", createEvent);
   $("#orgAccessForm").addEventListener("submit", validateAccessTicket);
   $("#orgInfoForm").addEventListener("submit", validateInfoTicket);
-  $("#startScan").addEventListener("click", startScanner);
+  $("#startScan").addEventListener("click", () => startScanner("access"));
   $("#stopScan").addEventListener("click", stopScanner);
+  $("#startInfoScan").addEventListener("click", () => startScanner("info"));
+  $("#stopInfoScan").addEventListener("click", stopScanner);
   renderOrgStats();
 }
 
@@ -601,14 +609,22 @@ async function askTransfer(code) {
 async function validateAccessTicket(event) {
   event.preventDefault();
   const code = ticketCodeFromInput(formData(event.target).code);
-  const { ticket } = await api(`/api/organization/access/${encodeURIComponent(code)}`);
-  $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true });
+  try {
+    const { ticket } = await api(`/api/organization/access/${encodeURIComponent(code)}`);
+    $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true });
+  } catch (error) {
+    $("#orgResult").innerHTML = `<p class="notice" style="color:var(--bad)">${escapeHtml(error.message)}</p>`;
+  }
 }
 
 async function validateInfoTicket(event) {
   event.preventDefault();
   const code = ticketCodeFromInput(formData(event.target).code);
-  await showTicket(code, "#orgInfoResult");
+  try {
+    await showTicket(code, "#orgInfoResult", { includeTrace: true });
+  } catch (error) {
+    $("#orgInfoResult").innerHTML = `<p class="notice" style="color:var(--bad)">${escapeHtml(error.message)}</p>`;
+  }
 }
 
 async function validateTicket(event) {
@@ -618,9 +634,9 @@ async function validateTicket(event) {
   await showTicket(code, target);
 }
 
-async function showTicket(code, targetSelector) {
+async function showTicket(code, targetSelector, options = {}) {
   const { ticket } = await api(`/api/tickets/${encodeURIComponent(code)}`);
-  $(targetSelector).innerHTML = ticketDetails(ticket, state.user?.role === "organization");
+  $(targetSelector).innerHTML = ticketDetails(ticket, state.user?.role === "organization", options);
 }
 
 async function admitTicket(code, targetSelector = "#orgResult") {
@@ -648,7 +664,7 @@ function ticketDetails(ticket, organization = false, options = {}) {
         <span class="pill ${verification.hashMatches ? "valid" : "tampered"}">${verification.hashMatches ? "Hash coincide" : "Hash alterado"}</span>
       </div>
       ${ticket.qrDataUrl ? `<img class="qr" src="${ticket.qrDataUrl}" alt="Codigo QR">` : ""}
-      ${organization && ticket.holder ? `<p><strong>Comprador:</strong> ${ticket.holder.name} · ${ticket.holder.email}</p>` : `<p class="muted">Datos personales protegidos con AES. No se muestran en validación pública.</p>`}
+      ${organization && ticket.holder ? `<p><strong>Titular registrado:</strong> ${escapeHtml(ticket.holder.name)} · ${escapeHtml(ticket.holder.email)}</p>` : `<p class="muted">Datos personales protegidos con AES. No se muestran en validación pública.</p>`}
       <div class="crypto-box">SHA-256: ${ticket.crypto.hash}<br>Firma ECDSA: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
       ${organization && !options.accessOnly && ticket.traceability ? traceabilityDetails(ticket.traceability) : ""}
       ${organization && ticket.status === "valid" ? `<button class="danger" onclick="admitTicket('${ticket.publicCode}')">Permitir acceso y consumir boleto</button>` : ""}
@@ -667,15 +683,37 @@ function traceabilityDetails(traceability) {
 
 let stream;
 let scanTimer;
+let currentScanMode = "access";
 
-async function startScanner() {
-  const notice = $("#scanNotice");
+function scannerTargets(mode = "access") {
+  if (mode === "info") {
+    return {
+      video: "#infoVideo",
+      notice: "#infoScanNotice",
+      result: "#orgInfoResult",
+      handler: infoTicketFromScan,
+    };
+  }
+  return {
+    video: "#video",
+    notice: "#scanNotice",
+    result: "#orgResult",
+    handler: accessTicketFromScan,
+  };
+}
+
+async function startScanner(mode = "access") {
+  currentScanMode = mode;
+  const targets = scannerTargets(mode);
+  const notice = $(targets.notice);
+  if (!notice) return;
   if (!("BarcodeDetector" in window)) {
     notice.textContent = "Este navegador no soporta BarcodeDetector. Usa el campo manual con el código visible.";
     return;
   }
+  stopScanner();
   stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-  const video = $("#video");
+  const video = $(targets.video);
   video.srcObject = stream;
   await video.play();
   const detector = new BarcodeDetector({ formats: ["qr_code"] });
@@ -684,7 +722,7 @@ async function startScanner() {
     if (codes[0]) {
       const code = ticketCodeFromInput(codes[0].rawValue);
       notice.textContent = `QR detectado: ${code}`;
-      await accessTicketFromScan(code);
+      await targets.handler(code);
       stopScanner();
     }
   }, 700);
@@ -695,13 +733,23 @@ async function accessTicketFromScan(code) {
     const { ticket } = await api(`/api/organization/access/${encodeURIComponent(code)}`);
     $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true });
   } catch (error) {
-    $("#orgResult").innerHTML = `<p class="notice" style="color:var(--bad)">${error.message}</p>`;
+    $("#orgResult").innerHTML = `<p class="notice" style="color:var(--bad)">${escapeHtml(error.message)}</p>`;
+  }
+}
+
+async function infoTicketFromScan(code) {
+  try {
+    await showTicket(code, "#orgInfoResult", { includeTrace: true });
+  } catch (error) {
+    $("#orgInfoResult").innerHTML = `<p class="notice" style="color:var(--bad)">${escapeHtml(error.message)}</p>`;
   }
 }
 
 function stopScanner() {
   clearInterval(scanTimer);
   if (stream) stream.getTracks().forEach((track) => track.stop());
+  const activeVideo = $(scannerTargets(currentScanMode).video);
+  if (activeVideo) activeVideo.srcObject = null;
   stream = null;
 }
 
