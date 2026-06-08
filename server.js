@@ -671,11 +671,51 @@ function encryptUserPrivateKey(privateKeyPem, password) {
 }
 
 function decryptUserPrivateKey(encrypted, password) {
-  const salt = Buffer.from(encrypted.salt, "base64");
-  const key = crypto.scryptSync(password, salt, 32);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(encrypted.iv, "base64"));
-  decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
-  return Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
+  try {
+    if (!encrypted?.salt || !encrypted?.iv || !encrypted?.tag || !encrypted?.ciphertext) {
+      const err = new Error("La llave privada del usuario no tiene un formato válido.");
+      err.code = "USER_KEY_INVALID";
+      throw err;
+    }
+    const salt = Buffer.from(encrypted.salt, "base64");
+    const key = crypto.scryptSync(password, salt, 32);
+    const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(encrypted.iv, "base64"));
+    decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
+    return Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
+  } catch (error) {
+    if (!error.code) error.code = "USER_KEY_DECRYPT_FAILED";
+    throw error;
+  }
+}
+
+function generateUserKeyPairForPassword(password) {
+  const userKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const publicKeyPem = userKeys.publicKey.export({ type: "spki", format: "pem" });
+  const privateKeyPem = userKeys.privateKey.export({ type: "pkcs8", format: "pem" });
+  return { publicKeyPem, encryptedPrivateKey: encryptUserPrivateKey(privateKeyPem, password), privateKeyPem };
+}
+
+function ensureUserPrivateKeyForPassword(user, password) {
+  if (!user) throw new Error("Usuario no encontrado.");
+  if (!user.encryptedPrivateKey || !user.publicKeyPem) {
+    const keys = generateUserKeyPairForPassword(password);
+    user.publicKeyPem = keys.publicKeyPem;
+    user.encryptedPrivateKey = keys.encryptedPrivateKey;
+    user.keyRotatedAt = new Date().toISOString();
+    return { privateKeyPem: keys.privateKeyPem, rotated: true };
+  }
+  try {
+    return { privateKeyPem: decryptUserPrivateKey(user.encryptedPrivateKey, password), rotated: false };
+  } catch (error) {
+    // Si la contraseña ya fue validada con bcrypt pero la llave no descifra,
+    // normalmente significa que el usuario cambió/restableció contraseña en una
+    // versión anterior y la llave quedó cifrada con la contraseña vieja.
+    const keys = generateUserKeyPairForPassword(password);
+    user.publicKeyPem = keys.publicKeyPem;
+    user.encryptedPrivateKey = keys.encryptedPrivateKey;
+    user.keyRotatedAt = new Date().toISOString();
+    return { privateKeyPem: keys.privateKeyPem, rotated: true };
+  }
 }
 
 function decryptSensitive(db, encrypted) {
@@ -715,10 +755,7 @@ function verifyTicket(db, ticket) {
 }
 
 function signTicketWithUser(ticket, user, password) {
-  if (!user?.encryptedPrivateKey || !user?.publicKeyPem) {
-    throw new Error("La cuenta no tiene llaves ECDSA de usuario.");
-  }
-  const privateKeyPem = decryptUserPrivateKey(user.encryptedPrivateKey, password);
+  const { privateKeyPem, rotated } = ensureUserPrivateKeyForPassword(user, password);
   const payload = canonical({
     ticketId: ticket.id,
     publicCode: ticket.publicCode,
@@ -739,8 +776,9 @@ function signTicketWithUser(ticket, user, password) {
     payloadHash: sha256(payload),
     signature: signer.sign(privateKeyPem, "base64"),
     publicKeyFingerprint: sha256(user.publicKeyPem || "").slice(0, 24),
+    keyRotated: rotated,
   };
-  ticket.transferHistory = [...(ticket.transferHistory || []), { action: "holder_signed", byUserId: user.id, byEmail: user.email, at: ticket.holderSignature.signedAt }];
+  ticket.transferHistory = [...(ticket.transferHistory || []), { action: rotated ? "holder_key_rotated_and_signed" : "holder_signed", byUserId: user.id, byEmail: user.email, at: ticket.holderSignature.signedAt }];
 }
 
 function effectiveStatus(ticket, events = []) {
@@ -1052,6 +1090,10 @@ app.post("/api/auth/reset", async (req, res) => {
   const user = db.users.find((item) => item.resetToken === token && item.resetExpires > Date.now());
   if (!user) return res.status(400).json({ error: "El enlace no es valido o ya expiro." });
   user.passwordHash = await bcrypt.hash(password, 10);
+  const keys = generateUserKeyPairForPassword(password);
+  user.publicKeyPem = keys.publicKeyPem;
+  user.encryptedPrivateKey = keys.encryptedPrivateKey;
+  user.keyRotatedAt = new Date().toISOString();
   delete user.resetToken;
   delete user.resetExpires;
   await writeDb(db);
@@ -1178,7 +1220,12 @@ app.post("/api/tickets", requireAuth, requireUser, async (req, res) => {
     transferHistory: [],
   };
   ticket.crypto = signTicket(db, publicClaims, ticket.encryptedHolder);
-  signTicketWithUser(ticket, user, req.body.password);
+  try {
+    signTicketWithUser(ticket, user, req.body.password);
+  } catch (error) {
+    console.error("[Firma de boleto]", error);
+    return res.status(400).json({ error: "No se pudo firmar el boleto con la llave ECDSA del usuario. Verifica la contraseña e intenta de nuevo." });
+  }
   ticket.qrUrl = `${BASE_URL}/ticket/${ticket.publicCode}`;
   ticket.qrDataUrl = await QRCode.toDataURL(ticket.qrUrl, { margin: 1, width: 340, color: { dark: "#4C4842", light: "#FFFFFF" } });
   ticket.pdfUrl = await createTicketPdf(ticket);
@@ -1237,27 +1284,12 @@ app.post("/api/tickets/:code/sign", requireAuth, requireUser, async (req, res) =
   if (!req.body.password || !(await bcrypt.compare(req.body.password, user.passwordHash))) {
     return res.status(401).json({ error: "Contrasena incorrecta para usar tu llave privada." });
   }
-  const privateKeyPem = decryptUserPrivateKey(user.encryptedPrivateKey, req.body.password);
-  const payload = canonical({
-    ticketId: ticket.id,
-    publicCode: ticket.publicCode,
-    visibleCode: ticket.visibleCode,
-    ownerId: ticket.ownerId,
-    issuedAt: ticket.publicClaims.issuedAt,
-  });
-  const signer = crypto.createSign("SHA256");
-  signer.update(payload);
-  signer.end();
-  ticket.holderSignature = {
-    alg: "ECDSA-P256-SHA256",
-    signerUserId: user.id,
-    signerEmail: user.email,
-    signedAt: new Date().toISOString(),
-    payloadHash: sha256(payload),
-    signature: signer.sign(privateKeyPem, "base64"),
-    publicKeyFingerprint: sha256(user.publicKeyPem || "").slice(0, 24),
-  };
-  ticket.transferHistory = [...(ticket.transferHistory || []), { action: "holder_signed", byUserId: user.id, byEmail: user.email, at: ticket.holderSignature.signedAt }];
+  try {
+    signTicketWithUser(ticket, user, req.body.password);
+  } catch (error) {
+    console.error("[Firma manual de boleto]", error);
+    return res.status(400).json({ error: "No se pudo firmar el boleto con la llave ECDSA del usuario. Verifica la contraseña e intenta de nuevo." });
+  }
   await writeDb(db);
   res.json({ ticket: summarizeTicket(ticket, db) });
 });
@@ -1324,7 +1356,12 @@ app.post("/api/transfers/:ticketId/accept", requireAuth, requireUser, async (req
   ticket.ownerId = recipient.id;
   ticket.transferHistory = [...(ticket.transferHistory || []), { ...ticket.transfer, acceptedAt: new Date().toISOString() }];
   delete ticket.transfer;
-  await refreshTicketCrypto(db, ticket, recipient, req.body.password);
+  try {
+    await refreshTicketCrypto(db, ticket, recipient, req.body.password);
+  } catch (error) {
+    console.error("[Firma de transferencia]", error);
+    return res.status(400).json({ error: "No se pudo firmar el boleto transferido con la llave ECDSA del usuario. Verifica la contraseña e intenta de nuevo." });
+  }
   await writeDb(db);
   res.json({ ticket: summarizeTicket(ticket, db) });
 });
