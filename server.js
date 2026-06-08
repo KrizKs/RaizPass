@@ -622,6 +622,14 @@ function seatLabel(seat) {
   return `${seat.zone} · Sección ${seat.section} · Lugar ${seat.seatNumber}`;
 }
 
+function maskEmailForPdf(email) {
+  const text = String(email || "").trim();
+  const [local, domain] = text.split("@");
+  if (!local || !domain) return text ? `${text.slice(0, 2)}****` : "";
+  const prefix = local.slice(0, 2);
+  return `${prefix}${"*".repeat(Math.max(local.length - 2, 4))}@${domain}`;
+}
+
 function ensureTicketRuntimeFields(ticket) {
   if (!ticket) return ticket;
   if (!ticket.publicCode) ticket.publicCode = nanoid(22);
@@ -822,7 +830,7 @@ async function ticketPdfBuffer(ticket, qrDataUrl) {
     doc.image(Buffer.from(qrImage, "base64"), 165, 320, { width: 240 });
     doc.fillColor("#4C4842").fontSize(12).text("Escanea para validar autenticidad sin revelar datos personales.", 92, 575, { align: "center", width: 410 });
     if (ticket.holderSignature) {
-      doc.fillColor("#82B979").fontSize(14).text(`Ticket firmado: responsabilidad de ${ticket.holderSignature.signerEmail}`, 48, 615);
+      doc.fillColor("#82B979").fontSize(14).text(`Ticket firmado: responsabilidad de ${maskEmailForPdf(ticket.holderSignature.signerEmail)}`, 48, 615);
     }
     doc.fillColor("#82B979").fontSize(9).text(`ID publico: ${ticket.publicClaims.ticketCode}`, 48, 730);
     doc.text(`Firma: ${ticket.crypto.signatureAlg} | Hash: ${ticket.crypto.hashAlg}`, 48, 746);
@@ -1388,7 +1396,7 @@ app.post("/api/organization/tickets/:code/admit", requireAuth, requireOrganizati
   ticket.accessLog.push({ by: req.session.userId, at: ticket.usedAt, action: "admitido" });
   await writeDb(db);
   const payload = summarizeTicket(ticket, db, { verification });
-  if (!ticket.holderSignature) payload.holder = decryptSensitive(db, ticket.encryptedHolder);
+  payload.holder = decryptSensitive(db, ticket.encryptedHolder);
   payload.accessMode = ticket.holderSignature ? "signed_fast_access" : "identity_check";
   res.json({ ticket: payload });
 });
@@ -1401,7 +1409,7 @@ app.get("/api/organization/access/:code", requireAuth, requireOrganization, asyn
   const verification = verifyTicket(db, ticket);
   const payload = summarizeTicket(ticket, db, { verification });
   payload.accessMode = ticket.holderSignature ? "signed_fast_access" : "identity_check";
-  if (!ticket.holderSignature) payload.holder = decryptSensitive(db, ticket.encryptedHolder);
+  payload.holder = decryptSensitive(db, ticket.encryptedHolder);
   res.json({ ticket: payload });
 });
 
