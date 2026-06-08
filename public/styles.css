@@ -663,3 +663,89 @@ svg {
     max-height: 310px;
   }
 }
+
+/* Fix7: barra superior fija y carruseles verticales controlados. */
+.app {
+  padding-top: 78px;
+}
+
+.topbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 80;
+}
+
+.ticket-list {
+  max-height: 780px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  scroll-snap-type: block proximity;
+}
+
+.ticket-list .ticket-card {
+  scroll-snap-align: start;
+}
+
+.stats-carousel {
+  max-height: 760px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 6px;
+  scroll-snap-type: block proximity;
+}
+
+.stats-carousel .stat-card {
+  scroll-snap-align: start;
+}
+
+.ticket-list::-webkit-scrollbar,
+.stats-carousel::-webkit-scrollbar {
+  width: 8px;
+}
+
+.ticket-list::-webkit-scrollbar-thumb,
+.stats-carousel::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
+}
+
+@media (max-width: 880px) {
+  .app {
+    padding-top: 128px;
+  }
+}
+
+@media (max-width: 640px) {
+  .app {
+    padding-top: 142px;
+  }
+
+  .topbar {
+    padding: 12px 14px;
+  }
+
+  .ticket-list,
+  .stats-carousel {
+    max-height: 720px;
+  }
+}
+
+/* Alturas mínimas para que el carrusel vertical no muestre más de 3 boletos o 4 eventos completos al mismo tiempo. */
+.ticket-list > .ticket-card {
+  min-height: 230px;
+}
+
+.stats-carousel > .stat-card {
+  min-height: 170px;
+}
+
+.ticket-list {
+  max-height: calc((230px * 3) + (12px * 2));
+}
+
+.stats-carousel {
+  max-height: calc((170px * 4) + (12px * 3));
+}

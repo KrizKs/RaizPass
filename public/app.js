@@ -431,25 +431,6 @@ function renderOrganization() {
       <div class="crypto-box">AES protege datos personales. ECDSA y SHA-256 validan autenticidad, integridad y responsabilidad del boleto firmado.</div>
     </div>
     <div class="grid">
-      <section class="panel span-5">
-        <h2>Crear evento</h2>
-        <form id="eventForm" class="form">
-          <label><span>Nombre del evento</span><input name="name" required placeholder="Festival Cultura Abierta"></label>
-          <label><span>Fecha</span><input name="date" type="date" required></label>
-          <label><span>Hora</span><input name="time" type="time" required></label>
-          <label><span>Lugar</span><input name="venue" required placeholder="Foro cultural"></label>
-          <label><span>Organización visible</span><input name="organizer" placeholder="${state.user.organizationName || state.user.name}"></label>
-          <div class="event-tools">
-            <label><span>Precio del boleto</span><input name="price" type="number" min="1" step="1" required placeholder="1000"></label>
-            <label><span>Divisa</span><select name="currency"><option value="MXN">MXN</option><option value="USD">USD</option><option value="EUR">EUR</option></select></label>
-          </div>
-          <button type="submit">Publicar evento</button>
-        </form>
-      </section>
-      <section class="panel span-7">
-        <h2>Boletos emitidos</h2>
-        <div id="orgStats" class="stats-grid"></div>
-      </section>
       <section class="panel span-6">
         <h2>Escáner de acceso</h2>
         <form id="orgAccessForm" class="form">
@@ -478,8 +459,27 @@ function renderOrganization() {
         <p id="infoScanNotice" class="muted">También puedes escanear el QR para consultar el expediente completo del boleto.</p>
         <div id="orgInfoResult"></div>
       </section>
+      <section class="panel span-5">
+        <h2>Crear evento</h2>
+        <form id="eventForm" class="form">
+          <label><span>Nombre del evento</span><input name="name" required placeholder="Festival Cultura Abierta"></label>
+          <label><span>Fecha</span><input name="date" type="date" required></label>
+          <label><span>Hora</span><input name="time" type="time" required></label>
+          <label><span>Lugar</span><input name="venue" required placeholder="Foro cultural"></label>
+          <label><span>Organización visible</span><input name="organizer" placeholder="${state.user.organizationName || state.user.name}"></label>
+          <div class="event-tools">
+            <label><span>Precio del boleto</span><input name="price" type="number" min="1" step="1" required placeholder="1000"></label>
+            <label><span>Divisa</span><select name="currency"><option value="MXN">MXN</option><option value="USD">USD</option><option value="EUR">EUR</option></select></label>
+          </div>
+          <button type="submit">Publicar evento</button>
+        </form>
+      </section>
+      <section class="panel span-7">
+        <h2>Boletos emitidos</h2>
+        <p class="muted">Se muestran hasta 4 eventos. Desliza verticalmente para consultar el resto.</p>
+        <div id="orgStats" class="stats-grid stats-carousel"></div>
+      </section>
     </div>`;
-
   const priceInput = $("#eventForm [name=price]");
   const currencySelect = $("#eventForm [name=currency]");
   currencySelect.addEventListener("change", (event) => {
@@ -611,7 +611,7 @@ async function validateAccessTicket(event) {
   const code = ticketCodeFromInput(formData(event.target).code);
   try {
     const { ticket } = await api(`/api/organization/access/${encodeURIComponent(code)}`);
-    $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true });
+    $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true, allowAdmit: true });
   } catch (error) {
     $("#orgResult").innerHTML = `<p class="notice" style="color:var(--bad)">${escapeHtml(error.message)}</p>`;
   }
@@ -667,7 +667,7 @@ function ticketDetails(ticket, organization = false, options = {}) {
       ${organization && ticket.holder ? `<p><strong>Titular registrado:</strong> ${escapeHtml(ticket.holder.name)} · ${escapeHtml(ticket.holder.email)}</p>` : `<p class="muted">Datos personales protegidos con AES. No se muestran en validación pública.</p>`}
       <div class="crypto-box">SHA-256: ${ticket.crypto.hash}<br>Firma ECDSA: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
       ${organization && !options.accessOnly && ticket.traceability ? traceabilityDetails(ticket.traceability) : ""}
-      ${organization && ticket.status === "valid" ? `<button class="danger" onclick="admitTicket('${ticket.publicCode}')">Permitir acceso y consumir boleto</button>` : ""}
+      ${organization && options.allowAdmit && ticket.status === "valid" ? `<button class="danger" onclick="admitTicket('${ticket.publicCode}')">Permitir acceso y consumir boleto</button>` : ""}
     </article>`;
 }
 
@@ -731,7 +731,7 @@ async function startScanner(mode = "access") {
 async function accessTicketFromScan(code) {
   try {
     const { ticket } = await api(`/api/organization/access/${encodeURIComponent(code)}`);
-    $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true });
+    $("#orgResult").innerHTML = ticketDetails(ticket, true, { accessOnly: true, allowAdmit: true });
   } catch (error) {
     $("#orgResult").innerHTML = `<p class="notice" style="color:var(--bad)">${escapeHtml(error.message)}</p>`;
   }
