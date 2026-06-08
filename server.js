@@ -1260,12 +1260,16 @@ app.get("/api/tickets/:code", async (req, res) => {
   const db = await loadDb();
   const ticket = findTicketByCode(db, req.params.code);
   if (!ticket) return res.status(404).json({ error: "Boleto no encontrado." });
+  if (req.session?.role === "organization" && ticket.organizationId !== req.session.userId) {
+    return res.status(403).json({ error: "Este boleto pertenece a otra organizacion." });
+  }
   const verification = verifyTicket(db, ticket);
+  const isOwnerOrganization = req.session?.role === "organization" && ticket.organizationId === req.session.userId;
   const payload = summarizeTicket(ticket, db, {
     verification,
-    includeTrace: req.session.role === "organization" && ticket.organizationId === req.session.userId,
+    includeTrace: isOwnerOrganization,
   });
-  if (req.session.role === "organization" && ticket.organizationId === req.session.userId) {
+  if (isOwnerOrganization) {
     payload.holder = decryptSensitive(db, ticket.encryptedHolder);
   }
   res.json({ ticket: payload });
