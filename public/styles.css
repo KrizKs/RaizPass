@@ -55,16 +55,17 @@ a {
 }
 
 .logo {
-  width: 92px;
-  height: 58px;
-  border-radius: 12px;
+  width: 86px;
+  height: 86px;
+  border-radius: 0;
   display: grid;
   place-items: center;
-  background: #fffaf0;
-  border: 1px solid rgba(76, 72, 66, 0.18);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
-  padding: 4px;
-  overflow: hidden;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+  overflow: visible;
+  flex: 0 0 auto;
 }
 
 .logo img {
@@ -760,7 +761,7 @@ svg {
 }
 
 
-/* Fix8: logo oficial y barra superior no fija. */
+/* Fix10: logo actualizado sin recorte ni fondo artificial; barra superior no fija. */
 .app {
   padding-top: 0;
 }
@@ -785,7 +786,7 @@ svg {
   }
 
   .logo {
-    width: 78px;
-    height: 50px;
+    width: 68px;
+    height: 68px;
   }
 }
