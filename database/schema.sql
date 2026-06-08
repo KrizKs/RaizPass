@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS tickets (
   transfer_history JSONB NOT NULL DEFAULT '[]'::jsonb,
   access_log JSONB NOT NULL DEFAULT '[]'::jsonb,
   holder_signature JSONB,
+  seat JSONB,
   hidden_for JSONB NOT NULL DEFAULT '[]'::jsonb,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   used_at TIMESTAMPTZ
@@ -61,3 +62,5 @@ CREATE TABLE IF NOT EXISTS deleted_ticket_counters (
   event_id TEXT PRIMARY KEY,
   count INTEGER NOT NULL DEFAULT 0
 );
+
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS seat JSONB;
