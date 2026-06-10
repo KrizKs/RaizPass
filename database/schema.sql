@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
   verified BOOLEAN NOT NULL DEFAULT FALSE,
   public_key_pem TEXT,
   encrypted_private_key JSONB,
+  public_key_history JSONB NOT NULL DEFAULT '[]'::jsonb,
   verification_token TEXT,
   reset_token TEXT,
   reset_expires BIGINT,
@@ -64,3 +65,4 @@ CREATE TABLE IF NOT EXISTS deleted_ticket_counters (
 );
 
 ALTER TABLE tickets ADD COLUMN IF NOT EXISTS seat JSONB;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS public_key_history JSONB NOT NULL DEFAULT '[]'::jsonb;
