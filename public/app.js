@@ -25,6 +25,31 @@ function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"]/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[char]));
 }
 
+
+function passwordStrength(password) {
+  const value = String(password || "");
+  let score = 0;
+  if (value.length >= 8) score++;
+  if (value.length >= 12) score++;
+  if (/[A-ZÁÉÍÓÚÑ]/.test(value)) score++;
+  if (/\d/.test(value)) score++;
+  if (/[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9]/.test(value)) score++;
+  const valid = value.length >= 8 && /[A-ZÁÉÍÓÚÑ]/.test(value) && /\d/.test(value) && /[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9]/.test(value);
+  if (!value) return { label: "Débil", level: "weak", percent: 0, valid: false };
+  if (score <= 2) return { label: "Débil", level: "weak", percent: 25, valid: false };
+  if (score === 3) return { label: "Moderada", level: "medium", percent: 50, valid };
+  if (score === 4) return { label: "Buena", level: "good", percent: 75, valid };
+  return { label: "Fuerte", level: "strong", percent: 100, valid };
+}
+
+function updatePasswordStrength(input, widget) {
+  if (!input || !widget) return;
+  const result = passwordStrength(input.value);
+  widget.className = `password-strength ${result.level}`;
+  $(".strength-track span", widget).style.width = `${result.percent}%`;
+  $("strong", widget).textContent = result.label;
+}
+
 function showToast(message, isError = false) {
   let toast = $("#toast");
   if (!toast) {
@@ -158,6 +183,11 @@ async function init() {
     });
   });
 
+  const registerPasswordInput = $("#registerPassword");
+  const registerPasswordWidget = $("#registerPasswordStrength");
+  registerPasswordInput?.addEventListener("input", () => updatePasswordStrength(registerPasswordInput, registerPasswordWidget));
+  updatePasswordStrength(registerPasswordInput, registerPasswordWidget);
+
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
@@ -173,9 +203,13 @@ async function init() {
   $("#registerForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     try {
-      const data = await api("/api/auth/register", { method: "POST", body: JSON.stringify(formData(event.target)) });
+      const payload = formData(event.target);
+      const strength = passwordStrength(payload.password);
+      if (!strength.valid) throw new Error("La contraseña debe tener mínimo 8 caracteres, una mayúscula, un número y un carácter especial.");
+      const data = await api("/api/auth/register", { method: "POST", body: JSON.stringify(payload) });
       setNotice(data.message);
       event.target.reset();
+      updatePasswordStrength(registerPasswordInput, registerPasswordWidget);
     } catch (error) {
       setNotice(error.message, true);
     }
@@ -434,7 +468,7 @@ function renderOrganization() {
       <section class="panel span-6">
         <h2>Escáner de acceso</h2>
         <form id="orgAccessForm" class="form">
-          <label><span>Código visible o QR escaneado</span><input name="code" placeholder="Ej. A1B2C3D4E5F6"></label>
+          <label><span>Código visible o QR escaneado</span><input name="code" placeholder="Ej. A1B2C3D4E5F6078"></label>
           <button type="submit">Ver datos de acceso</button>
         </form>
         <div class="actions" style="margin-top:12px">

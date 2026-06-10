@@ -40,7 +40,12 @@
           <form id="registerForm" class="form auth-form hidden">
             <label><span>Nombre completo</span><input name="name" required minlength="3" placeholder="Nombre Apellido"></label>
             <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
-            <label><span>Contrasena</span><input name="password" type="password" required minlength="8" placeholder="Minimo 8 caracteres"></label>
+            <label><span>Contrasena</span><input id="registerPassword" name="password" type="password" required minlength="8" placeholder="Minimo 8 caracteres"></label>
+            <div class="password-strength" id="registerPasswordStrength" aria-live="polite">
+              <div class="strength-track"><span></span></div>
+              <strong>Débil</strong>
+              <small>Mínimo 8 caracteres, una mayúscula, un número y un carácter especial.</small>
+            </div>
             <button type="submit">Crear y enviar validacion</button>
           </form>
 
@@ -50,7 +55,7 @@
           </form>
 
           <form id="lookupForm" class="form auth-form hidden">
-            <label><span>Codigo visible</span><input name="code" required placeholder="Ej. A1B2C3D4E5F6"></label>
+            <label><span>Codigo visible</span><input name="code" required placeholder="Ej. A1B2C3D4E5F6078"></label>
             <button type="submit">Ver datos del boleto</button>
           </form>
 

@@ -790,3 +790,32 @@ svg {
     height: 68px;
   }
 }
+
+.password-strength {
+  display: grid;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+.strength-track {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(76, 72, 66, 0.16);
+}
+.strength-track span {
+  display: block;
+  width: 0%;
+  height: 100%;
+  border-radius: inherit;
+  transition: width .22s ease, background .22s ease;
+  background: var(--bad);
+}
+.password-strength strong { color: var(--bad); }
+.password-strength.medium .strength-track span { background: #d89d38; }
+.password-strength.medium strong { color: #b37112; }
+.password-strength.good .strength-track span { background: #82B979; }
+.password-strength.good strong { color: #4f8748; }
+.password-strength.strong .strength-track span { background: #3a9f78; }
+.password-strength.strong strong { color: #2d7f60; }
+.password-strength small { line-height: 1.35; }
