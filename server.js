@@ -3,6 +3,7 @@ import "dotenv/config";
 import connectPgSimple from "connect-pg-simple";
 import crypto from "node:crypto";
 import express from "express";
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import PDFDocument from "pdfkit";
@@ -32,6 +33,10 @@ const CURRENCIES = {
   EUR: { label: "Euros", rateToMxn: 20 },
 };
 
+const SERVER_KEY_SECRET = process.env.SERVER_KEY_SECRET || process.env.SERVER_KEY_PASSPHRASE || process.env.SESSION_SECRET || "";
+const SCRYPT_PARAMS = { N: Number(process.env.SCRYPT_N || 131072), r: Number(process.env.SCRYPT_R || 8), p: Number(process.env.SCRYPT_P || 1), maxmem: Number(process.env.SCRYPT_MAXMEM || 256 * 1024 * 1024) };
+const PASSWORD_POLICY_MESSAGE = "La contraseña debe tener mínimo 8 caracteres, una mayúscula, un número y un carácter especial.";
+
 const SEAT_CAPACITY_PER_SECTION = 500;
 const ZONE_SECTIONS = {
   "Zona Roja": ["101", "102", "103", "104", "105", "106"],
@@ -43,6 +48,7 @@ const ZONE_SECTIONS = {
   "Zona Amarilla": ["701", "702", "703", "704", "705", "706"],
 };
 let cachedServerKeys = null;
+let cachedMasterKey = null;
 const pool = process.env.DATABASE_URL
   ? new pg.Pool({
       connectionString: process.env.DATABASE_URL,
@@ -56,22 +62,97 @@ const DEMO_ORGS = [
   { id: "org-zenit", name: "Zenit Producciones", email: "zenit@expo.test" },
 ];
 
+function readSecretFile(envName) {
+  const filePath = process.env[envName];
+  if (!filePath) return null;
+  try {
+    return crypto.createHash("sha256").update(readFileSync(filePath)).digest();
+  } catch {
+    return null;
+  }
+}
+
+function normalizeBase64Key(value) {
+  if (!value) return null;
+  const key = Buffer.from(String(value).trim(), "base64");
+  return key.length === 32 ? key : crypto.createHash("sha256").update(key).digest();
+}
+
+function getMasterKey() {
+  if (cachedMasterKey) return cachedMasterKey;
+  const fromFile = readSecretFile("DATA_KEY_MASTER_FILE");
+  if (fromFile) cachedMasterKey = fromFile;
+  else {
+    const explicit = normalizeBase64Key(process.env.DATA_KEY_MASTER_BASE64 || process.env.AES_KEY_BASE64);
+    cachedMasterKey = explicit || crypto.createHash("sha256").update("raizpass-local-aes-key").digest();
+  }
+  delete process.env.AES_KEY_BASE64;
+  delete process.env.DATA_KEY_MASTER_BASE64;
+  return cachedMasterKey;
+}
+
 function getAesKey() {
-  if (process.env.AES_KEY_BASE64) return Buffer.from(process.env.AES_KEY_BASE64, "base64");
-  return crypto.createHash("sha256").update("raizpass-local-aes-key").digest();
+  return getMasterKey();
+}
+
+function decryptJsonEnvelope(envelope, secret) {
+  if (!envelope?.salt || !envelope?.iv || !envelope?.tag || !envelope?.ciphertext) {
+    throw new Error("Formato de secreto cifrado inválido.");
+  }
+  const key = crypto.scryptSync(secret, Buffer.from(envelope.salt, "base64"), 32, SCRYPT_PARAMS);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.iv, "base64"));
+  if (envelope.aad) decipher.setAAD(Buffer.from(String(envelope.aad), "utf8"));
+  decipher.setAuthTag(Buffer.from(envelope.tag, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(envelope.ciphertext, "base64")), decipher.final()]).toString("utf8");
+}
+
+function encryptJsonEnvelope(plainText, secret, aad = "raizpass-server-key") {
+  const salt = crypto.randomBytes(16);
+  const iv = crypto.randomBytes(12);
+  const key = crypto.scryptSync(secret, salt, 32, SCRYPT_PARAMS);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(aad, "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(plainText, "utf8"), cipher.final()]);
+  return { alg: "AES-256-GCM", kdf: "scrypt", scrypt: SCRYPT_PARAMS, aad, salt: salt.toString("base64"), iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
+}
+
+function loadServerPrivateKeyPem() {
+  if (process.env.ECDSA_PRIVATE_KEY_ENC_JSON) {
+    if (!SERVER_KEY_SECRET) throw new Error("Define SERVER_KEY_SECRET o SERVER_KEY_PASSPHRASE para descifrar ECDSA_PRIVATE_KEY_ENC_JSON.");
+    return decryptJsonEnvelope(JSON.parse(process.env.ECDSA_PRIVATE_KEY_ENC_JSON), SERVER_KEY_SECRET);
+  }
+  if (process.env.ECDSA_PRIVATE_KEY_FILE) return readFileSync(process.env.ECDSA_PRIVATE_KEY_FILE, "utf8");
+  if (process.env.ECDSA_PRIVATE_KEY_PEM) return process.env.ECDSA_PRIVATE_KEY_PEM.replace(/\\n/g, "\n");
+  return null;
 }
 
 function getServerKeys() {
   if (cachedServerKeys) return cachedServerKeys;
-  if (process.env.ECDSA_PUBLIC_KEY_PEM && process.env.ECDSA_PRIVATE_KEY_PEM) {
-    cachedServerKeys = {
-      publicKey: crypto.createPublicKey(process.env.ECDSA_PUBLIC_KEY_PEM.replace(/\\n/g, "\n")),
-      privateKey: crypto.createPrivateKey(process.env.ECDSA_PRIVATE_KEY_PEM.replace(/\\n/g, "\n")),
-    };
-    return cachedServerKeys;
+  const privateKeyPem = loadServerPrivateKeyPem();
+  const publicKeyPem = process.env.ECDSA_PUBLIC_KEY_PEM?.replace(/\\n/g, "\n") || (process.env.ECDSA_PUBLIC_KEY_FILE ? readFileSync(process.env.ECDSA_PUBLIC_KEY_FILE, "utf8") : null);
+  if (privateKeyPem) {
+    const privateKey = crypto.createPrivateKey(privateKeyPem);
+    const publicKey = publicKeyPem ? crypto.createPublicKey(publicKeyPem) : crypto.createPublicKey(privateKey);
+    cachedServerKeys = { publicKey, privateKey };
+  } else {
+    cachedServerKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   }
-  cachedServerKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  delete process.env.ECDSA_PRIVATE_KEY_PEM;
+  delete process.env.ECDSA_PRIVATE_KEY_ENC_JSON;
   return cachedServerKeys;
+}
+
+function exportServerPublicKeyPem() {
+  return getServerKeys().publicKey.export({ type: "spki", format: "pem" });
+}
+
+function exportServerPrivateKeyPemForLocalFallback() {
+  return getServerKeys().privateKey.export({ type: "pkcs8", format: "pem" });
+}
+
+function validatePasswordPolicy(password) {
+  const value = String(password || "");
+  return value.length >= 8 && /[A-ZÁÉÍÓÚÑ]/.test(value) && /\d/.test(value) && /[^A-Za-zÁÉÍÓÚÑáéíóúñ0-9]/.test(value);
 }
 
 async function ensurePostgres() {
@@ -87,6 +168,7 @@ async function ensurePostgres() {
       verified BOOLEAN NOT NULL DEFAULT FALSE,
       public_key_pem TEXT,
       encrypted_private_key JSONB,
+      public_key_history JSONB NOT NULL DEFAULT '[]'::jsonb,
       verification_token TEXT,
       reset_token TEXT,
       reset_expires BIGINT,
@@ -136,6 +218,7 @@ async function ensurePostgres() {
   `);
   await pool.query(`
     ALTER TABLE tickets ADD COLUMN IF NOT EXISTS seat JSONB;
+    ALTER TABLE users ADD COLUMN IF NOT EXISTS public_key_history JSONB NOT NULL DEFAULT '[]'::jsonb;
   `);
 }
 
@@ -172,8 +255,8 @@ async function ensureStorage() {
         events: seedEvents(),
         keys: {
           aesKey: getAesKey().toString("base64"),
-          publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
-          privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
+          publicKeyPem: exportServerPublicKeyPem(),
+          privateKeyPem: exportServerPrivateKeyPemForLocalFallback(),
         },
         meta: { createdAt: new Date().toISOString(), seedVersion: 5 },
       });
@@ -196,8 +279,8 @@ async function ensureStorage() {
       events: seedEventsV2(),
       keys: {
         aesKey: getAesKey().toString("base64"),
-        publicKeyPem: publicKey.export({ type: "spki", format: "pem" }),
-        privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }),
+        publicKeyPem: exportServerPublicKeyPem(),
+        privateKeyPem: exportServerPrivateKeyPemForLocalFallback(),
       },
       meta: { createdAt: new Date().toISOString(), seedVersion: 5 },
     };
@@ -252,6 +335,10 @@ function migrateDb(db) {
     };
   });
   db.meta.seedVersion = Math.max(Number(db.meta.seedVersion || 0), 5);
+  db.users = db.users.map((user) => ({
+    ...user,
+    publicKeyHistory: user.publicKeyHistory || (user.publicKeyPem ? [{ keyId: user.currentKeyId || sha256(user.publicKeyPem).slice(0, 12), publicKeyPem: user.publicKeyPem, createdAt: user.createdAt || new Date().toISOString(), reason: "legacy_import", status: "active", fingerprint: sha256(user.publicKeyPem).slice(0, 24) }] : []),
+  }));
   db.tickets = db.tickets.map((ticket) => ({
     ...ticket,
     eventId: ticket.eventId || db.events.find((event) => event.name === ticket.publicClaims?.eventName)?.id || db.events[0]?.id,
@@ -266,6 +353,9 @@ function migrateDb(db) {
     },
     seat: ticket.seat || ticket.publicClaims?.seat || null,
     hiddenFor: ticket.hiddenFor || [],
+    holderSignature: ticket.holderSignature?.signature && !ticket.holderSignature.publicKeyPem
+      ? { ...ticket.holderSignature, publicKeyPem: db.users.find((user) => user.id === ticket.holderSignature.signerUserId)?.publicKeyPem || ticket.holderSignature.publicKeyPem }
+      : ticket.holderSignature,
   }));
   return db;
 }
@@ -413,6 +503,7 @@ async function readPostgresDb() {
       verified: row.verified,
       publicKeyPem: row.public_key_pem,
       encryptedPrivateKey: row.encrypted_private_key,
+      publicKeyHistory: row.public_key_history || [],
       verificationToken: row.verification_token,
       resetToken: row.reset_token,
       resetExpires: row.reset_expires ? Number(row.reset_expires) : undefined,
@@ -457,9 +548,9 @@ async function readPostgresDb() {
     })),
     deletedTicketCounters: Object.fromEntries(counters.rows.map((row) => [row.event_id, row.count])),
     keys: {
-      aesKey: getAesKey().toString("base64"),
-      publicKeyPem: getServerKeys().publicKey.export({ type: "spki", format: "pem" }),
-      privateKeyPem: getServerKeys().privateKey.export({ type: "pkcs8", format: "pem" }),
+      aesKey: getMasterKey().toString("base64"),
+      publicKeyPem: exportServerPublicKeyPem(),
+      privateKeyPem: exportServerPrivateKeyPemForLocalFallback(),
     },
     meta: meta.rows.find((row) => row.key === "state")?.value || Object.fromEntries(meta.rows.map((row) => [row.key, row.value])),
   };
@@ -471,10 +562,10 @@ async function writePostgresDb(db) {
     await client.query("BEGIN");
     for (const user of db.users || []) {
       await client.query(
-        `INSERT INTO users (id, role, name, organization_name, email, password_hash, verified, public_key_pem, encrypted_private_key, verification_token, reset_token, reset_expires, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
-         ON CONFLICT (id) DO UPDATE SET role=$2,name=$3,organization_name=$4,email=$5,password_hash=$6,verified=$7,public_key_pem=$8,encrypted_private_key=$9,verification_token=$10,reset_token=$11,reset_expires=$12`,
-        [user.id, user.role, user.name, user.organizationName, user.email, user.passwordHash, Boolean(user.verified), user.publicKeyPem, JSON.stringify(user.encryptedPrivateKey || null), user.verificationToken, user.resetToken, user.resetExpires || null, user.createdAt || new Date().toISOString()],
+        `INSERT INTO users (id, role, name, organization_name, email, password_hash, verified, public_key_pem, encrypted_private_key, public_key_history, verification_token, reset_token, reset_expires, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         ON CONFLICT (id) DO UPDATE SET role=$2,name=$3,organization_name=$4,email=$5,password_hash=$6,verified=$7,public_key_pem=$8,encrypted_private_key=$9,public_key_history=$10,verification_token=$11,reset_token=$12,reset_expires=$13`,
+        [user.id, user.role, user.name, user.organizationName, user.email, user.passwordHash, Boolean(user.verified), user.publicKeyPem, JSON.stringify(user.encryptedPrivateKey || null), JSON.stringify(user.publicKeyHistory || []), user.verificationToken, user.resetToken, user.resetExpires || null, user.createdAt || new Date().toISOString()],
       );
     }
     for (const event of db.events || []) {
@@ -563,19 +654,20 @@ function validateEmail(email) {
 }
 
 function canonical(value) {
+  if (value === undefined) return "null";
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value && typeof value === "object") {
-    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
+    return `{${Object.keys(value).filter((key) => value[key] !== undefined).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
 }
 
-function sha256(value) {
-  return crypto.createHash("sha256").update(value).digest("hex");
+function sha256(value, encoding = "hex") {
+  return crypto.createHash("sha256").update(value).digest(encoding);
 }
 
 function makeVisibleCode(ticketId, timestamp = new Date().toISOString()) {
-  return sha256(`${ticketId}||${timestamp}`).slice(0, 12).toUpperCase();
+  return sha256(`${ticketId}||${timestamp}`).slice(0, 16).toUpperCase();
 }
 
 function normalizeZone(value) {
@@ -649,28 +741,57 @@ function findTicketByCode(db, code) {
   return ensureTicketRuntimeFields(ticket);
 }
 
-function encryptSensitive(db, payload) {
-  const key = Buffer.from(db.keys.aesKey, "base64");
+function wrapDataKey(masterKey, dataKey, aad) {
   const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const cipher = crypto.createCipheriv("aes-256-gcm", masterKey, iv);
+  cipher.setAAD(Buffer.from(aad, "utf8"));
+  const ciphertext = Buffer.concat([cipher.update(dataKey), cipher.final()]);
+  return { alg: "AES-256-GCM", iv: iv.toString("base64"), tag: cipher.getAuthTag().toString("base64"), ciphertext: ciphertext.toString("base64") };
+}
+
+function unwrapDataKey(masterKey, wrapped, aad) {
+  const decipher = crypto.createDecipheriv("aes-256-gcm", masterKey, Buffer.from(wrapped.iv, "base64"));
+  decipher.setAAD(Buffer.from(aad, "utf8"));
+  decipher.setAuthTag(Buffer.from(wrapped.tag, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(wrapped.ciphertext, "base64")), decipher.final()]);
+}
+
+function encryptSensitive(db, payload, context = {}) {
+  const masterKey = Buffer.from(db.keys.aesKey, "base64");
+  const dataKey = crypto.randomBytes(32);
+  const iv = crypto.randomBytes(12);
+  const aad = canonical({ purpose: "ticket-holder", ticketId: context.ticketId || payload.ticketId || null, eventId: context.eventId || null, version: 2 });
+  const cipher = crypto.createCipheriv("aes-256-gcm", dataKey, iv);
+  cipher.setAAD(Buffer.from(aad, "utf8"));
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload), "utf8"), cipher.final()]);
   return {
+    version: 2,
     alg: "AES-256-GCM",
+    mode: "GCM",
+    keyManagement: "envelope-aes-256-gcm",
+    aad,
     iv: iv.toString("base64"),
     tag: cipher.getAuthTag().toString("base64"),
     ciphertext: ciphertext.toString("base64"),
+    wrappedDataKey: wrapDataKey(masterKey, dataKey, aad),
   };
 }
 
 function encryptUserPrivateKey(privateKeyPem, password) {
   const salt = crypto.randomBytes(16);
   const iv = crypto.randomBytes(12);
-  const key = crypto.scryptSync(password, salt, 32);
+  const key = crypto.scryptSync(password, salt, 32, SCRYPT_PARAMS);
+  const aad = "raizpass-user-private-key-v2";
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  cipher.setAAD(Buffer.from(aad, "utf8"));
   const ciphertext = Buffer.concat([cipher.update(privateKeyPem, "utf8"), cipher.final()]);
   return {
+    version: 2,
     alg: "AES-256-GCM",
+    mode: "GCM",
     kdf: "scrypt",
+    scrypt: SCRYPT_PARAMS,
+    aad,
     salt: salt.toString("base64"),
     iv: iv.toString("base64"),
     tag: cipher.getAuthTag().toString("base64"),
@@ -686,8 +807,10 @@ function decryptUserPrivateKey(encrypted, password) {
       throw err;
     }
     const salt = Buffer.from(encrypted.salt, "base64");
-    const key = crypto.scryptSync(password, salt, 32);
+    const opts = encrypted.scrypt || SCRYPT_PARAMS;
+    const key = crypto.scryptSync(password, salt, 32, { ...SCRYPT_PARAMS, ...opts });
     const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(encrypted.iv, "base64"));
+    if (encrypted.aad) decipher.setAAD(Buffer.from(String(encrypted.aad), "utf8"));
     decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
     return Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]).toString("utf8");
   } catch (error) {
@@ -696,37 +819,42 @@ function decryptUserPrivateKey(encrypted, password) {
   }
 }
 
-function generateUserKeyPairForPassword(password) {
+function generateUserKeyPairForPassword(password, reason = "registration") {
   const userKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
   const publicKeyPem = userKeys.publicKey.export({ type: "spki", format: "pem" });
   const privateKeyPem = userKeys.privateKey.export({ type: "pkcs8", format: "pem" });
-  return { publicKeyPem, encryptedPrivateKey: encryptUserPrivateKey(privateKeyPem, password), privateKeyPem };
+  const keyId = nanoid(10);
+  return { publicKeyPem, encryptedPrivateKey: encryptUserPrivateKey(privateKeyPem, password), privateKeyPem, keyId, keyRecord: { keyId, publicKeyPem, createdAt: new Date().toISOString(), reason, status: "active", fingerprint: sha256(publicKeyPem).slice(0, 24) } };
+}
+
+function installUserKeyPair(user, keys) {
+  user.publicKeyPem = keys.publicKeyPem;
+  user.encryptedPrivateKey = keys.encryptedPrivateKey;
+  user.currentKeyId = keys.keyId;
+  user.publicKeyHistory = [...(user.publicKeyHistory || []), keys.keyRecord];
 }
 
 function ensureUserPrivateKeyForPassword(user, password) {
   if (!user) throw new Error("Usuario no encontrado.");
   if (!user.encryptedPrivateKey || !user.publicKeyPem) {
-    const keys = generateUserKeyPairForPassword(password);
-    user.publicKeyPem = keys.publicKeyPem;
-    user.encryptedPrivateKey = keys.encryptedPrivateKey;
-    user.keyRotatedAt = new Date().toISOString();
-    return { privateKeyPem: keys.privateKeyPem, rotated: true };
+    const keys = generateUserKeyPairForPassword(password, "legacy_missing_key");
+    installUserKeyPair(user, keys);
+    return { privateKeyPem: keys.privateKeyPem, rotated: true, keyId: keys.keyId };
   }
-  try {
-    return { privateKeyPem: decryptUserPrivateKey(user.encryptedPrivateKey, password), rotated: false };
-  } catch (error) {
-    // Si la contraseña ya fue validada con bcrypt pero la llave no descifra,
-    // normalmente significa que el usuario cambió/restableció contraseña en una
-    // versión anterior y la llave quedó cifrada con la contraseña vieja.
-    const keys = generateUserKeyPairForPassword(password);
-    user.publicKeyPem = keys.publicKeyPem;
-    user.encryptedPrivateKey = keys.encryptedPrivateKey;
-    user.keyRotatedAt = new Date().toISOString();
-    return { privateKeyPem: keys.privateKeyPem, rotated: true };
-  }
+  return { privateKeyPem: decryptUserPrivateKey(user.encryptedPrivateKey, password), rotated: false, keyId: user.currentKeyId || user.publicKeyHistory?.at(-1)?.keyId || sha256(user.publicKeyPem).slice(0, 12) };
 }
 
 function decryptSensitive(db, encrypted) {
+  if (encrypted?.version === 2 && encrypted.wrappedDataKey) {
+    const masterKey = Buffer.from(db.keys.aesKey, "base64");
+    const aad = encrypted.aad || "";
+    const dataKey = unwrapDataKey(masterKey, encrypted.wrappedDataKey, aad);
+    const decipher = crypto.createDecipheriv("aes-256-gcm", dataKey, Buffer.from(encrypted.iv, "base64"));
+    if (aad) decipher.setAAD(Buffer.from(aad, "utf8"));
+    decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
+    const plain = Buffer.concat([decipher.update(Buffer.from(encrypted.ciphertext, "base64")), decipher.final()]);
+    return JSON.parse(plain.toString("utf8"));
+  }
   const key = Buffer.from(db.keys.aesKey, "base64");
   const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(encrypted.iv, "base64"));
   decipher.setAuthTag(Buffer.from(encrypted.tag, "base64"));
@@ -734,10 +862,15 @@ function decryptSensitive(db, encrypted) {
   return JSON.parse(plain.toString("utf8"));
 }
 
+function signedTicketMessage(publicClaims, encryptedHolder) {
+  return canonical({ publicClaims, encryptedHolder });
+}
+
 function signTicket(db, publicClaims, encryptedHolder) {
-  const digest = sha256(canonical({ publicClaims, encryptedHolder }));
+  const message = signedTicketMessage(publicClaims, encryptedHolder);
+  const digest = sha256(message);
   const signer = crypto.createSign("SHA256");
-  signer.update(digest);
+  signer.update(message);
   signer.end();
   return {
     hash: digest,
@@ -745,26 +878,27 @@ function signTicket(db, publicClaims, encryptedHolder) {
     publicKeyFingerprint: sha256(db.keys.publicKeyPem).slice(0, 24),
     signatureAlg: "ECDSA-P256-SHA256",
     hashAlg: "SHA-256",
+    canonicalization: "JCS-like-stable-json",
+    signedBytes: "canonical(publicClaims, encryptedHolder)",
   };
 }
 
-function verifyTicket(db, ticket) {
-  const recalculatedHash = sha256(canonical({ publicClaims: ticket.publicClaims, encryptedHolder: ticket.encryptedHolder }));
-  const verifier = crypto.createVerify("SHA256");
-  verifier.update(recalculatedHash);
-  verifier.end();
-  const signatureValid = verifier.verify(db.keys.publicKeyPem, ticket.crypto.signature, "base64");
-  return {
-    hashMatches: recalculatedHash === ticket.crypto.hash,
-    signatureValid,
-    authentic: recalculatedHash === ticket.crypto.hash && signatureValid,
-    recalculatedHash,
-  };
+function holderSignaturePayload(ticket) {
+  return canonical({
+    ticketId: ticket.id,
+    publicCode: ticket.publicCode,
+    visibleCode: ticket.visibleCode,
+    ownerId: ticket.ownerId,
+    eventId: ticket.eventId,
+    seat: ticket.seat || null,
+    issuedAt: ticket.publicClaims.issuedAt,
+    holderPublicKeyFingerprint: ticket.holderSignature?.publicKeyFingerprint || null,
+    signerKeyId: ticket.holderSignature?.signerKeyId || null,
+  });
 }
 
-function signTicketWithUser(ticket, user, password) {
-  const { privateKeyPem, rotated } = ensureUserPrivateKeyForPassword(user, password);
-  const payload = canonical({
+function legacyHolderSignaturePayload(ticket) {
+  return canonical({
     ticketId: ticket.id,
     publicCode: ticket.publicCode,
     visibleCode: ticket.visibleCode,
@@ -773,20 +907,71 @@ function signTicketWithUser(ticket, user, password) {
     seat: ticket.seat || null,
     issuedAt: ticket.publicClaims.issuedAt,
   });
-  const signer = crypto.createSign("SHA256");
-  signer.update(payload);
-  signer.end();
+}
+
+function signTicketWithUser(ticket, user, password) {
+  const { privateKeyPem, rotated, keyId } = ensureUserPrivateKeyForPassword(user, password);
+  const publicKeyFingerprint = sha256(user.publicKeyPem || "").slice(0, 24);
+  const signedAt = new Date().toISOString();
   ticket.holderSignature = {
     alg: "ECDSA-P256-SHA256",
     signerUserId: user.id,
     signerEmail: user.email,
-    signedAt: new Date().toISOString(),
-    payloadHash: sha256(payload),
-    signature: signer.sign(privateKeyPem, "base64"),
-    publicKeyFingerprint: sha256(user.publicKeyPem || "").slice(0, 24),
+    signerKeyId: keyId,
+    signedAt,
+    publicKeyPem: user.publicKeyPem,
+    publicKeyFingerprint,
     keyRotated: rotated,
   };
-  ticket.transferHistory = [...(ticket.transferHistory || []), { action: rotated ? "holder_key_rotated_and_signed" : "holder_signed", byUserId: user.id, byEmail: user.email, at: ticket.holderSignature.signedAt }];
+  const payload = holderSignaturePayload(ticket);
+  const signer = crypto.createSign("SHA256");
+  signer.update(payload);
+  signer.end();
+  ticket.holderSignature.payloadHash = sha256(payload);
+  ticket.holderSignature.signature = signer.sign(privateKeyPem, "base64");
+  ticket.transferHistory = [...(ticket.transferHistory || []), { action: rotated ? "holder_key_created_and_signed" : "holder_signed", byUserId: user.id, byEmail: user.email, signerKeyId: keyId, at: signedAt }];
+}
+
+function verifyHolderSignature(db, ticket) {
+  if (!ticket.holderSignature?.signature) return { present: false, valid: false, reason: "Boleto sin firma de titular." };
+  const publicKeyPem = ticket.holderSignature.publicKeyPem || db.users.find((user) => user.id === ticket.holderSignature.signerUserId)?.publicKeyPem;
+  if (!publicKeyPem) return { present: true, valid: false, reason: "No se encontró la llave pública del titular." };
+  const payload = holderSignaturePayload(ticket);
+  const legacyPayload = legacyHolderSignaturePayload(ticket);
+  const verifyPayload = (candidate) => {
+    const verifier = crypto.createVerify("SHA256");
+    verifier.update(candidate);
+    verifier.end();
+    return verifier.verify(publicKeyPem, ticket.holderSignature.signature, "base64");
+  };
+  const currentHashMatches = !ticket.holderSignature.payloadHash || ticket.holderSignature.payloadHash === sha256(payload);
+  const currentSignatureValid = verifyPayload(payload);
+  const legacyHashMatches = Boolean(ticket.holderSignature.payloadHash && ticket.holderSignature.payloadHash === sha256(legacyPayload));
+  const legacySignatureValid = !currentSignatureValid && verifyPayload(legacyPayload);
+  const valid = (currentHashMatches && currentSignatureValid) || (legacyHashMatches && legacySignatureValid);
+  return { present: true, valid: Boolean(valid), hashMatches: currentHashMatches || legacyHashMatches, signatureValid: currentSignatureValid || legacySignatureValid, legacyFormat: Boolean(legacySignatureValid), publicKeyFingerprint: sha256(publicKeyPem).slice(0, 24), signerKeyId: ticket.holderSignature.signerKeyId || null };
+}
+
+function verifyTicket(db, ticket) {
+  const message = signedTicketMessage(ticket.publicClaims, ticket.encryptedHolder);
+  const recalculatedHash = sha256(message);
+  const verifyServerPayload = (payload) => {
+    const verifier = crypto.createVerify("SHA256");
+    verifier.update(payload);
+    verifier.end();
+    return verifier.verify(db.keys.publicKeyPem, ticket.crypto.signature, "base64");
+  };
+  const signatureValid = verifyServerPayload(message);
+  const legacyDoubleHashSignature = !signatureValid && verifyServerPayload(recalculatedHash);
+  const holder = verifyHolderSignature(db, ticket);
+  return {
+    hashMatches: recalculatedHash === ticket.crypto.hash,
+    signatureValid: signatureValid || legacyDoubleHashSignature,
+    legacyDoubleHashSignature,
+    holderSignature: holder,
+    authentic: recalculatedHash === ticket.crypto.hash && (signatureValid || legacyDoubleHashSignature) && (!holder.present || holder.valid),
+    recalculatedHash,
+  };
 }
 
 function effectiveStatus(ticket, events = []) {
@@ -819,14 +1004,15 @@ async function ticketPdfBuffer(ticket, qrDataUrl) {
     doc.rect(0, 0, 595, 142).fill("#4C4842");
     const logoPath = path.join(__dirname, "public", "LogoEVRaizPass.png");
     try {
-      doc.roundedRect(430, 22, 118, 70, 10).fill("#fffaf0");
-      doc.image(logoPath, 438, 29, { fit: [102, 56], align: "center", valign: "center" });
+      // Logo cuadrado, sin fondo artificial y sin recorte. Se coloca en el cuerpo blanco
+      // del PDF para conservar contraste sin usar la caja beige anterior.
+      doc.image(logoPath, 462, 156, { fit: [78, 78], align: "center", valign: "center" });
     } catch (error) {
-      doc.fillColor("#E3CC8C").fontSize(10).text("RaizPass", 458, 48);
+      doc.fillColor("#4C4842").fontSize(10).text("RaizPass", 474, 184);
     }
     doc.fillColor("#E3CC8C").fontSize(26).text("Pase verificado", 48, 54);
     doc.fillColor("#ffffff").fontSize(14).text(ticket.publicClaims.organizer, 48, 88);
-    doc.fillColor("#4C4842").fontSize(20).text(ticket.publicClaims.eventName, 48, 172);
+    doc.fillColor("#4C4842").fontSize(20).text(ticket.publicClaims.eventName, 48, 172, { width: 390 });
     doc.fillColor("#4C4842").fontSize(12).text(`${ticket.publicClaims.eventDate} - ${ticket.publicClaims.eventTime}`, 48, 204);
     doc.text(ticket.publicClaims.venue, 48, 224);
     doc.fontSize(14).text(`Costo original: $${ticket.publicClaims.price} ${ticket.publicClaims.currency || ticket.currency || "MXN"}`, 48, 250);
@@ -854,7 +1040,7 @@ async function refreshTicketCrypto(db, ticket, owner, password) {
     email: owner.email,
     purchasedAt: ticket.createdAt,
     currentHolderSince: new Date().toISOString(),
-  });
+  }, { ticketId: ticket.id, eventId: ticket.eventId });
   ticket.crypto = signTicket(db, ticket.publicClaims, ticket.encryptedHolder);
   signTicketWithUser(ticket, owner, password);
   ticket.qrUrl = `${BASE_URL}/ticket/${ticket.publicCode}`;
@@ -997,7 +1183,7 @@ app.post("/api/auth/register", async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || String(name).trim().length < 3) return res.status(400).json({ error: "Escribe tu nombre completo." });
   if (!validateEmail(email)) return res.status(400).json({ error: "El correo no tiene un formato valido." });
-  if (!password || password.length < 8) return res.status(400).json({ error: "La contrasena debe tener al menos 8 caracteres." });
+  if (!validatePasswordPolicy(password)) return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
 
   const db = await loadDb();
   const normalizedEmail = String(email).trim().toLowerCase();
@@ -1019,8 +1205,7 @@ app.post("/api/auth/register", async (req, res) => {
 
   const isDemoOrganization = normalizedEmail.endsWith("@expo.test");
   const token = nanoid(36);
-  const userKeys = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
-  const privateKeyPem = userKeys.privateKey.export({ type: "pkcs8", format: "pem" });
+  const userKeys = generateUserKeyPairForPassword(password, "registration");
   const user = {
     id: nanoid(12),
     role: isDemoOrganization ? "organization" : "user",
@@ -1028,8 +1213,10 @@ app.post("/api/auth/register", async (req, res) => {
     organizationName: isDemoOrganization ? String(name).trim() : undefined,
     email: normalizedEmail,
     passwordHash: await bcrypt.hash(password, 10),
-    publicKeyPem: userKeys.publicKey.export({ type: "spki", format: "pem" }),
-    encryptedPrivateKey: encryptUserPrivateKey(privateKeyPem, password),
+    publicKeyPem: userKeys.publicKeyPem,
+    encryptedPrivateKey: userKeys.encryptedPrivateKey,
+    currentKeyId: userKeys.keyId,
+    publicKeyHistory: [userKeys.keyRecord],
     verified: isDemoOrganization,
     verificationToken: isDemoOrganization ? undefined : token,
     createdAt: new Date().toISOString(),
@@ -1100,14 +1287,13 @@ app.get("/reset-password", (req, res) => res.sendFile(path.join(__dirname, "publ
 
 app.post("/api/auth/reset", async (req, res) => {
   const { token, password } = req.body;
-  if (!password || password.length < 8) return res.status(400).json({ error: "La contrasena debe tener al menos 8 caracteres." });
+  if (!validatePasswordPolicy(password)) return res.status(400).json({ error: PASSWORD_POLICY_MESSAGE });
   const db = await loadDb();
   const user = db.users.find((item) => item.resetToken === token && item.resetExpires > Date.now());
   if (!user) return res.status(400).json({ error: "El enlace no es valido o ya expiro." });
   user.passwordHash = await bcrypt.hash(password, 10);
-  const keys = generateUserKeyPairForPassword(password);
-  user.publicKeyPem = keys.publicKeyPem;
-  user.encryptedPrivateKey = keys.encryptedPrivateKey;
+  const keys = generateUserKeyPairForPassword(password, "password_reset_new_crypto_identity");
+  installUserKeyPair(user, keys);
   user.keyRotatedAt = new Date().toISOString();
   delete user.resetToken;
   delete user.resetExpires;
@@ -1228,7 +1414,7 @@ app.post("/api/tickets", requireAuth, requireUser, async (req, res) => {
       email: user.email,
       purchasedAt: issuedAt,
       currentHolderSince: issuedAt,
-    }),
+    }, { ticketId, eventId: event.id }),
     accessLog: [],
     hiddenFor: [],
     createdAt: issuedAt,
