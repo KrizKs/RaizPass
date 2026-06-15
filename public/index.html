@@ -12,11 +12,11 @@
         <div>
           <div class="brand-mark"><span class="logo"><img src="/LogoEVRaizPass.png" alt="Eventos Globales"></span><span>RaizPass</span></div>
           <h1>Intermediario seguro para eventos con boletos privados</h1>
-          <p>Organizaciones publican eventos y clientes gestionan boletos verificables con AES, SHA-256, ECDSA y codigos QR.</p>
+          <p>Organizaciones publican eventos y clientes gestionan boletos verificables con AES, SHA-256, ECDSA y códigos QR.</p>
           <div class="crypto-strip">
             <div class="metric"><strong>AES</strong><span>Datos sensibles cifrados</span></div>
             <div class="metric"><strong>ECDSA</strong><span>Firma digital verificable</span></div>
-            <div class="metric"><strong>QR</strong><span>Validacion publica</span></div>
+            <div class="metric"><strong>QR</strong><span>Validación pública</span></div>
           </div>
         </div>
         <p style="text-align:center;font-size:22px;font-style:oblique;"><strong>Tu boleto, tu seguridad.</strong></p>
@@ -33,29 +33,29 @@
 
           <form id="loginForm" class="form auth-form">
             <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
-            <label><span>Contrasena</span><input name="password" type="password" required minlength="8" placeholder="Minimo 8 caracteres"></label>
+            <label><span>Contraseña</span><input name="password" type="password" required minlength="8" placeholder="Minimo 8 caracteres"></label>
             <button type="submit">Entrar</button>
           </form>
 
           <form id="registerForm" class="form auth-form hidden">
             <label><span>Nombre completo</span><input name="name" required minlength="3" placeholder="Nombre Apellido"></label>
             <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
-            <label><span>Contrasena</span><input id="registerPassword" name="password" type="password" required minlength="8" placeholder="Minimo 8 caracteres"></label>
+            <label><span>Contraseña</span><input id="registerPassword" name="password" type="password" required minlength="8" placeholder="Minimo 8 caracteres"></label>
             <div class="password-strength" id="registerPasswordStrength" aria-live="polite">
               <div class="strength-track"><span></span></div>
               <strong>Débil</strong>
               <small>Mínimo 8 caracteres, una mayúscula, un número y un carácter especial.</small>
             </div>
-            <button type="submit">Crear y enviar validacion</button>
+            <button type="submit">Crear y enviar validación</button>
           </form>
 
           <form id="forgotForm" class="form auth-form hidden">
             <label><span>Correo</span><input name="email" type="email" required placeholder="tu@correo.com"></label>
-            <button type="submit">Enviar recuperacion</button>
+            <button type="submit">Enviar recuperación</button>
           </form>
 
           <form id="lookupForm" class="form auth-form hidden">
-            <label><span>Codigo visible</span><input name="code" required placeholder="Ej. A1B2C3D4E5F6078"></label>
+            <label><span>Código visible</span><input name="code" required placeholder="Ej. A1B2C3D4E5F6078"></label>
             <button type="submit">Ver datos del boleto</button>
           </form>
 
