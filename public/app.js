@@ -233,7 +233,7 @@ async function init() {
       const data = await api(`/api/tickets/${encodeURIComponent(code)}`);
       location.href = `/ticket/${data.ticket.publicCode}`;
     } catch {
-      setNotice("Codigo incorrecto o no existe.", true);
+      setNotice("Código incorrecto o no existe.", true);
     }
   });
 
