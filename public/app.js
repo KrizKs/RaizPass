@@ -278,7 +278,7 @@ async function loadDashboard() {
   }
   $("#authView").style.display = "none";
   $("#appView").style.display = "block";
-  $("#userLabel").textContent = `${state.user.organizationName || state.user.name} (${state.user.role === "organization" ? "organizacion" : "cliente"})`;
+  $("#userLabel").textContent = `${state.user.organizationName || state.user.name} (${state.user.role === "organization" ? "Organización" : "Cliente"})`;
   renderDashboard();
 }
 
@@ -291,7 +291,7 @@ function renderUser() {
   $("#dashboard").innerHTML = `
     <div class="hero-band">
       <div><h1>Eventos disponibles</h1><p>Explora eventos creados por organizaciones, compra boletos y conserva la validación criptográfica de cada QR.</p></div>
-      <div class="crypto-box">AES protege tus datos. ECDSA y SHA-256 prueban autenticidad e integridad sin revelar tu identidad.</div>
+      <div class="crypto-box">Se protegen tus datos, se prueba autenticidad e integridad sin revelar tu identidad.</div>
     </div>
     <div class="grid">
       <section class="panel span-7">
