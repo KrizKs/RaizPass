@@ -697,9 +697,9 @@ function ticketDetails(ticket, organization = false, options = {}) {
         <span class="pill ${verification.authentic ? "valid" : "tampered"}">${verification.authentic ? "Firma auténtica" : "Firma inválida"}</span>
         <span class="pill ${verification.hashMatches ? "valid" : "tampered"}">${verification.hashMatches ? "Hash coincide" : "Hash alterado"}</span>
       </div>
-      ${ticket.qrDataUrl ? `<img class="qr" src="${ticket.qrDataUrl}" alt="Codigo QR">` : ""}
-      ${organization && ticket.holder ? `<p><strong>Titular registrado:</strong> ${escapeHtml(ticket.holder.name)} · ${escapeHtml(ticket.holder.email)}</p>` : `<p class="muted">Datos personales protegidos con AES. No se muestran en validación pública.</p>`}
-      <div class="crypto-box">SHA-256: ${ticket.crypto.hash}<br>Firma: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
+      ${ticket.qrDataUrl ? `<img class="qr" src="${ticket.qrDataUrl}" alt="Código QR">` : ""}
+      ${organization && ticket.holder ? `<p><strong>Titular registrado:</strong> ${escapeHtml(ticket.holder.name)} · ${escapeHtml(ticket.holder.email)}</p>` : `<p class="muted">Datos personales protegidos. No se muestran en validación pública.</p>`}
+      <div class="crypto-box">Hash: ${ticket.crypto.hash}<br>Firma: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
       ${organization && !options.accessOnly && ticket.traceability ? traceabilityDetails(ticket.traceability) : ""}
       ${organization && options.allowAdmit && ticket.status === "valid" ? `<button class="danger" onclick="admitTicket('${ticket.publicCode}')">Permitir acceso y consumir boleto</button>` : ""}
     </article>`;
