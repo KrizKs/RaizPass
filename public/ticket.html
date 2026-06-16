@@ -42,7 +42,7 @@
               <span class="pill ${verification.authentic ? "valid" : "tampered"}">${verification.authentic ? "Firma auténtica" : "Firma invalida"}</span>
               <span class="pill ${verification.hashMatches ? "valid" : "tampered"}">${verification.hashMatches ? "Hash íntegro" : "Hash alterado"}</span>
             </div>
-            <div class="crypto-box">Código: ${ticket.publicClaims.ticketCode}<br>SHA-256: ${ticket.crypto.hash}<br>Firma ECDSA: ${ticket.crypto.signature.slice(0, 96)}...</div>
+            <div class="crypto-box">Código: ${ticket.publicClaims.ticketCode}<br>Firma: ${ticket.crypto.signature.slice(0, 96)}...</div>
           `;
         })
         .catch((error) => {
