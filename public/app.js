@@ -344,7 +344,7 @@ async function openPurchaseModal(eventItem) {
     <div class="form">
       <label><span>Zona</span><select id="zoneSelect"><option value="">Selecciona zona</option>${zoneOptions}</select></label>
       <label><span>Sección</span><select id="sectionSelect" disabled><option value="">Selecciona sección</option></select></label>
-      <label><span>Contraseña</span><input id="purchasePassword" type="password" placeholder="Firma ECDSA del boleto" autocomplete="current-password"></label>
+      <label><span>Contraseña</span><input id="purchasePassword" type="password" placeholder="Ingresa tu contraseña para firmar el boleto" autocomplete="current-password"></label>
     </div>
     <div class="modal-actions">
       <button class="ghost" data-modal-cancel>Cancelar</button>
