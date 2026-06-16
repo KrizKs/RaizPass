@@ -441,7 +441,7 @@ function renderIncomingTransfers() {
     </article>`).join("");
   container.onclick = async (event) => {
     if (event.target.dataset.accept) {
-      const password = await promptModal("Aceptar transferencia", "Para recibir el boleto, se actualizará el titular y se firmará con tu llave privada ECDSA.", "Contraseña", { type: "password", action: "Aceptar boleto" });
+      const password = await promptModal("Aceptar transferencia", "Para recibir el boleto, se actualizará el titular y se firmará con tu llave privada.", "Contraseña", { type: "password", action: "Aceptar boleto" });
       if (!password) return;
       try {
         await api(`/api/transfers/${event.target.dataset.accept}/accept`, { method: "POST", body: JSON.stringify({ password }) });
@@ -462,7 +462,7 @@ function renderOrganization() {
   $("#dashboard").innerHTML = `
     <div class="hero-band">
       <div><h1>Panel de organización</h1><p>Crea eventos, consulta boletos emitidos y usa el acceso por QR o código visible sin mostrar trazabilidad durante el ingreso.</p></div>
-      <div class="crypto-box">AES protege datos personales. ECDSA y SHA-256 validan autenticidad, integridad y responsabilidad del boleto firmado.</div>
+      <div class="crypto-box">Se protegen datos personales, se validan autenticidad, integridad y responsabilidad del boleto firmado.</div>
     </div>
     <div class="grid">
       <section class="panel span-6">
@@ -594,7 +594,7 @@ function renderTicketList(container, tickets, organization) {
       <span class="pill">Código visible: ${ticket.visibleCode || "No generado"}</span>
       ${ticket.seat ? `<span class="pill">${seatText(ticket.seat)}</span>` : ""}
       <a class="button secondary" href="${ticketPdfUrl(ticket)}" target="_blank" rel="noopener">PDF</a>
-      ${ticket.holderSignature ? `<span class="pill valid">Firmado ECDSA: ${ticket.holderSignature.signerEmail}</span>` : ""}
+      ${ticket.holderSignature ? `<span class="pill valid">Firmado por: ${ticket.holderSignature.signerEmail}</span>` : ""}
       <button data-transfer="${ticket.publicCode}" ${ticket.status !== "valid" || pending ? "disabled" : ""}>Transferir</button>
       <button class="secondary" data-delete="${ticket.publicCode}" ${pending ? "disabled" : ""}>Eliminar boleto</button>
       ${pending ? `<span class="pill transfer_pending">Transferencia pendiente para ${ticket.transfer.toEmail}</span>` : ""}
@@ -699,7 +699,7 @@ function ticketDetails(ticket, organization = false, options = {}) {
       </div>
       ${ticket.qrDataUrl ? `<img class="qr" src="${ticket.qrDataUrl}" alt="Codigo QR">` : ""}
       ${organization && ticket.holder ? `<p><strong>Titular registrado:</strong> ${escapeHtml(ticket.holder.name)} · ${escapeHtml(ticket.holder.email)}</p>` : `<p class="muted">Datos personales protegidos con AES. No se muestran en validación pública.</p>`}
-      <div class="crypto-box">SHA-256: ${ticket.crypto.hash}<br>Firma ECDSA: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
+      <div class="crypto-box">SHA-256: ${ticket.crypto.hash}<br>Firma: ${ticket.crypto.signature.slice(0, 96)}...<br>Llave pública: ${ticket.crypto.publicKeyFingerprint}</div>
       ${organization && !options.accessOnly && ticket.traceability ? traceabilityDetails(ticket.traceability) : ""}
       ${organization && options.allowAdmit && ticket.status === "valid" ? `<button class="danger" onclick="admitTicket('${ticket.publicCode}')">Permitir acceso y consumir boleto</button>` : ""}
     </article>`;
