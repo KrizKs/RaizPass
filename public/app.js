@@ -410,7 +410,7 @@ function renderEventList() {
       const purchase = await openPurchaseModal(selected);
       if (!purchase) return;
       await api("/api/tickets", { method: "POST", body: JSON.stringify({ eventId: id, ...purchase }) });
-      showToast("Boleto comprado y firmado con tu llave ECDSA.");
+      showToast("Boleto comprado y firmado.");
       await loadDashboard();
     } catch (error) {
       showToast(error.message, true);
